@@ -1,4 +1,5 @@
-tesseract-ocr
-tesseract-ocr-spa
-cmake
-libgl1
+streamlit
+pillow
+pytesseract
+reportlab
+face_recognition
