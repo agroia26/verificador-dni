@@ -80,34 +80,38 @@ def rotar_imagen(pil_img, grados):
     return pil_img
 
 def extraer_datos_reverso(img_reverso_bgr):
-    """Recorte calibrado de alta precisión para el reverso del DNI español"""
+    """Extracción optimizada eliminando marcas de agua mediante el canal azul"""
     h, w, _ = img_reverso_bgr.shape
 
-    # 1. Zona Domicilio: Cuadrante superior izquierdo-centro (del 0% al 28% de altura)
-    crop_dom = img_reverso_bgr[int(h*0.02):int(h*0.30), int(w*0.48):int(w*0.82)]
-
-    # 2. Zona Lugar de Nacimiento: Cuadrante medio (del 44% al 62% de altura)
-    crop_nac = img_reverso_bgr[int(h*0.44):int(h*0.62), int(w*0.48):int(w*0.82)]
+    # Recortes más amplios horizontalmente (del 34% al 92% del ancho)
+    crop_dom = img_reverso_bgr[int(h*0.01):int(h*0.35), int(w*0.34):int(w*0.92)]
+    crop_nac = img_reverso_bgr[int(h*0.38):int(h*0.65), int(w*0.34):int(w*0.92)]
 
     def procesar_ocr_crop(crop_img):
-        gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+        # El canal AZUL elimina la marca de agua amarilla/dorada del fondo del DNI
+        blue_channel = crop_img[:, :, 0]
         
-        # Filtro bilateral para suavizar ruido sin perder bordes de letras
-        filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+        # Escalado x3 para mejorar resolución de fuentes pequeñas
+        h_c, w_c = blue_channel.shape
+        resized = cv2.resize(blue_channel, (w_c * 3, h_c * 3), interpolation=cv2.INTER_CUBIC)
         
-        # Binarización limpia
-        _, thresh = cv2.threshold(filtered, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Ecualización adaptativa de contraste
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(resized)
+
+        # Probar lectura en gris optimizado y en binarizado adaptativo
+        txt1 = pytesseract.image_to_string(enhanced, lang='spa', config='--psm 6')
         
-        txt = pytesseract.image_to_string(thresh, lang='spa', config='--psm 6')
-        if len(txt.strip()) < 3:
-            txt = pytesseract.image_to_string(gray, lang='spa', config='--psm 6')
-        return txt
+        thresh = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 10)
+        txt2 = pytesseract.image_to_string(thresh, lang='spa', config='--psm 6')
+
+        # Devolver el texto con mayor número de caracteres válidos
+        return txt1 if len(txt1.strip()) > len(txt2.strip()) else txt2
 
     txt_dom = procesar_ocr_crop(crop_dom)
     txt_nac = procesar_ocr_crop(crop_nac)
 
-    # Filtrar líneas Domicilio
+    # Filtrar Domicilio
     dom_lines = []
     for line in txt_dom.split('\n'):
         clean = line.strip()
@@ -115,22 +119,29 @@ def extraer_datos_reverso(img_reverso_bgr):
         if not clean:
             continue
         if any(k in upper for k in ["DOMICILIO", "DNI", "REINO", "ESPAÑA"]):
-            continue
+            # Si la palabra Domicilio está pegada en la misma línea, la removemos
+            clean = re.sub(r'(?i)DOMICILIO', '', clean).strip()
+            if not clean:
+                continue
         clean_text = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', clean).strip()
-        if len(clean_text) > 2:
+        if len(clean_text) >= 2:
             dom_lines.append(clean_text)
 
-    # Filtrar líneas Lugar de Nacimiento
+    # Filtrar Lugar de Nacimiento
     nac_lines = []
     for line in txt_nac.split('\n'):
         clean = line.strip()
         upper = clean.upper()
         if not clean:
             continue
-        if any(k in upper for k in ["LUGAR", "NACIMIENTO", "HIJO", "PADRES", "CANDIDO", "EMILIA"]):
-            continue
+        if any(k in upper for k in ["HIJO", "PADRES", "CANDIDO", "EMILIA", "EQUIPO", "IDESP"]):
+            break
+        if any(k in upper for k in ["LUGAR", "NACIMIENTO"]):
+            clean = re.sub(r'(?i)LUGAR|NACIMIENTO', '', clean).strip()
+            if not clean:
+                continue
         clean_text = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', clean).strip()
-        if len(clean_text) > 2:
+        if len(clean_text) >= 2:
             nac_lines.append(clean_text)
 
     domicilio_str = "\n".join(dom_lines) if dom_lines else "No detectado"
