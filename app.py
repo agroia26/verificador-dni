@@ -30,7 +30,6 @@ def detectar_y_recortar_rostro(img_bgr):
         obtener_cascade()
         face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        
         gray_eq = cv2.equalizeHist(gray)
         faces = face_cascade.detectMultiScale(gray_eq, scaleFactor=1.1, minNeighbors=3, minSize=(50, 50))
         
@@ -79,75 +78,62 @@ def rotar_imagen(pil_img, grados):
         return pil_img.rotate(-270, expand=True)
     return pil_img
 
+def limpiar_texto_ruido(texto_raw, max_lineas=3):
+    """Filtra y elimina de forma estricta líneas con basura/ruido de OCR"""
+    lineas_limpias = []
+    for line in texto_raw.split('\n'):
+        clean = line.strip()
+        if not clean:
+            continue
+        
+        # Ignorar encabezados conocidos
+        upper = clean.upper()
+        if any(k in upper for k in ["DOMICILIO", "LUGAR DE NACIMIENTO", "PADRES", "HIJO", "EQUIPO", "IDESP", "REINO"]):
+            continue
+
+        # Mantener solo caracteres alfanuméricos y puntuación básica
+        clean_text = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', clean).strip()
+        palabras = clean_text.split()
+
+        # Filtrar líneas basura (por ejemplo, líneas llenas de letras sueltas 'a b c d')
+        palabras_validas = [p for p in palabras if len(p) > 1 or p.isdigit()]
+        if len(palabras_validas) >= 1 and len(clean_text) >= 3:
+            lineas_limpias.append(clean_text)
+
+        if len(lineas_limpias) >= max_lineas:
+            break
+
+    return "\n".join(lineas_limpias)
+
 def extraer_datos_reverso(img_reverso_bgr):
-    """Extracción optimizada eliminando marcas de agua mediante el canal azul"""
+    """Procesamiento OCR mejorado con limpieza adaptativa"""
     h, w, _ = img_reverso_bgr.shape
 
-    # Recortes más amplios horizontalmente (del 34% al 92% del ancho)
-    crop_dom = img_reverso_bgr[int(h*0.01):int(h*0.35), int(w*0.34):int(w*0.92)]
-    crop_nac = img_reverso_bgr[int(h*0.38):int(h*0.65), int(w*0.34):int(w*0.92)]
+    # Recortes más holgados para no perder texto por bordes de imagen
+    crop_dom = img_reverso_bgr[int(h*0.02):int(h*0.38), int(w*0.30):int(w*0.90)]
+    crop_nac = img_reverso_bgr[int(h*0.38):int(h*0.65), int(w*0.30):int(w*0.90)]
 
-    def procesar_ocr_crop(crop_img):
-        # El canal AZUL elimina la marca de agua amarilla/dorada del fondo del DNI
-        blue_channel = crop_img[:, :, 0]
+    def procesar_crop(crop):
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        # Binarización suave
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
-        # Escalado x3 para mejorar resolución de fuentes pequeñas
-        h_c, w_c = blue_channel.shape
-        resized = cv2.resize(blue_channel, (w_c * 3, h_c * 3), interpolation=cv2.INTER_CUBIC)
-        
-        # Ecualización adaptativa de contraste
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        enhanced = clahe.apply(resized)
+        txt = pytesseract.image_to_string(thresh, lang='spa', config='--psm 6')
+        if len(txt.strip()) < 5:
+            txt = pytesseract.image_to_string(gray, lang='spa', config='--psm 6')
+        return txt
 
-        # Probar lectura en gris optimizado y en binarizado adaptativo
-        txt1 = pytesseract.image_to_string(enhanced, lang='spa', config='--psm 6')
-        
-        thresh = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 10)
-        txt2 = pytesseract.image_to_string(thresh, lang='spa', config='--psm 6')
+    raw_dom = procesar_crop(crop_dom)
+    raw_nac = procesar_crop(crop_nac)
 
-        # Devolver el texto con mayor número de caracteres válidos
-        return txt1 if len(txt1.strip()) > len(txt2.strip()) else txt2
-
-    txt_dom = procesar_ocr_crop(crop_dom)
-    txt_nac = procesar_ocr_crop(crop_nac)
-
-    # Filtrar Domicilio
-    dom_lines = []
-    for line in txt_dom.split('\n'):
-        clean = line.strip()
-        upper = clean.upper()
-        if not clean:
-            continue
-        if any(k in upper for k in ["DOMICILIO", "DNI", "REINO", "ESPAÑA"]):
-            # Si la palabra Domicilio está pegada en la misma línea, la removemos
-            clean = re.sub(r'(?i)DOMICILIO', '', clean).strip()
-            if not clean:
-                continue
-        clean_text = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', clean).strip()
-        if len(clean_text) >= 2:
-            dom_lines.append(clean_text)
-
-    # Filtrar Lugar de Nacimiento
-    nac_lines = []
-    for line in txt_nac.split('\n'):
-        clean = line.strip()
-        upper = clean.upper()
-        if not clean:
-            continue
-        if any(k in upper for k in ["HIJO", "PADRES", "CANDIDO", "EMILIA", "EQUIPO", "IDESP"]):
-            break
-        if any(k in upper for k in ["LUGAR", "NACIMIENTO"]):
-            clean = re.sub(r'(?i)LUGAR|NACIMIENTO', '', clean).strip()
-            if not clean:
-                continue
-        clean_text = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', clean).strip()
-        if len(clean_text) >= 2:
-            nac_lines.append(clean_text)
-
-    domicilio_str = "\n".join(dom_lines) if dom_lines else "No detectado"
-    lugar_nac_str = "\n".join(nac_lines) if nac_lines else "No detectado"
+    domicilio_str = limpiar_texto_ruido(raw_dom, max_lineas=3)
+    lugar_nac_str = limpiar_texto_ruido(raw_nac, max_lineas=2)
 
     return lugar_nac_str, domicilio_str
+
+# ------------------- INTERFAZ STREAMLIT -------------------
 
 foto_dni_front = st.file_uploader("1. Sube la foto del DNI (Anverso)", type=["jpg", "png", "jpeg"])
 foto_dni_back = st.file_uploader("2. Sube la foto del DNI (Reverso)", type=["jpg", "png", "jpeg"])
@@ -159,7 +145,7 @@ if foto_dni_front and foto_original:
     img_dni_back_pil = ImageOps.exif_transpose(Image.open(foto_dni_back)).convert("RGB") if foto_dni_back else None
 
     st.markdown("---")
-    st.subheader("🔄 Ajuste de Rotación")
+    st.subheader("🔄 Ajuste de Orientación")
 
     col_rot1, col_rot2, col_rot3 = st.columns(3)
     with col_rot1:
@@ -180,8 +166,10 @@ if foto_dni_front and foto_original:
         img_user_pil = rotar_imagen(img_user_pil, rot_user)
         st.image(img_user_pil, caption="Rostro Orientado", use_container_width=True)
 
-    if st.button("🚀 Procesar Verificación"):
-        with st.spinner("Procesando imágenes, analizando rostro y extrayendo datos..."):
+    st.markdown("---")
+
+    if st.button("🔍 Extraer Datos y Verificar Rostro"):
+        with st.spinner("Analizando imágenes..."):
             path_dni_front = "dni_front_temp.jpg"
             path_user = "usuario_temp.jpg"
             path_dni_back = "dni_back_temp.jpg"
@@ -192,10 +180,10 @@ if foto_dni_front and foto_original:
             img_front_cv = cv2.imread(path_dni_front)
             img_user_cv = cv2.imread(path_user)
 
-            # 1. Comparación de rostro
-            es_misma_persona = comparar_rostros(img_front_cv, img_user_cv)
+            # Comparar rostros
+            st.session_state["es_misma_persona"] = comparar_rostros(img_front_cv, img_user_cv)
 
-            # 2. OCR Anverso
+            # OCR Anverso
             gray_dni = cv2.cvtColor(img_front_cv, cv2.COLOR_BGR2GRAY)
             h, w = gray_dni.shape
             if w < 1400:
@@ -206,43 +194,64 @@ if foto_dni_front and foto_original:
             texto_front += "\n" + pytesseract.image_to_string(gray_dni, lang='spa', config='--psm 6')
 
             match_dni = re.search(r'\b\d{8}\s*[-_]?\s*[A-Za-z]\b', texto_front)
-            numero_dni = re.sub(r'[\s\-_]', '', match_dni.group(0)).upper() if match_dni else "No detectado"
+            st.session_state["numero_dni"] = re.sub(r'[\s\-_]', '', match_dni.group(0)).upper() if match_dni else ""
 
             patron_fechas = r'\b(\d{2})[\s/.-](\d{2})[\s/.-](\d{4})\b'
             fechas_coincidentes = re.findall(patron_fechas, texto_front)
             fechas_formateadas = [f"{d}/{m}/{a}" for d, m, a in fechas_coincidentes]
 
-            fecha_nacimiento = "No detectada"
-            fecha_caducidad = "No detectada"
-
-            if len(fechas_formateadas) >= 3:
-                fecha_nacimiento = fechas_formateadas[0]
-                fecha_caducidad = fechas_formateadas[2]
-            elif len(fechas_formateadas) == 2:
-                fecha_nacimiento = fechas_formateadas[0]
-                fecha_caducidad = fechas_formateadas[1]
-            elif len(fechas_formateadas) == 1:
-                fecha_nacimiento = fechas_formateadas[0]
+            st.session_state["fecha_nacimiento"] = fechas_formateadas[0] if len(fechas_formateadas) >= 1 else ""
+            st.session_state["fecha_caducidad"] = fechas_formateadas[-1] if len(fechas_formateadas) >= 2 else ""
 
             match_validez = re.search(r'(?:VALIDEZ|VAL)[^\d]*(\d{2}[\s/.-]\d{2}[\s/.-]\d{4})', texto_front, re.IGNORECASE)
             if match_validez:
-                fecha_caducidad = match_validez.group(1).replace(' ', '/').replace('.', '/').replace('-', '/')
+                st.session_state["fecha_caducidad"] = match_validez.group(1).replace(' ', '/').replace('.', '/').replace('-', '/')
 
-            # 3. OCR Reverso
-            lugar_nacimiento = "No aportado"
-            domicilio = "No aportado"
-
+            # OCR Reverso
             if img_dni_back_pil:
                 img_dni_back_pil.save(path_dni_back)
                 img_back_cv = cv2.imread(path_dni_back)
-                lugar_nacimiento, domicilio = extraer_datos_reverso(img_back_cv)
+                nac, dom = extraer_datos_reverso(img_back_cv)
+                st.session_state["lugar_nacimiento"] = nac
+                st.session_state["domicilio"] = dom
+            else:
+                st.session_state["lugar_nacimiento"] = ""
+                st.session_state["domicilio"] = ""
 
-            # 4. Generar PDF
+            st.session_state["procesado"] = True
+
+    # Formulario de revisión de datos extraídos
+    if st.session_state.get("procesado", False):
+        st.subheader("📝 Revisión y Validación de Datos Extraídos")
+        st.caption("Verifica o corrige cualquier dato antes de generar el informe en PDF:")
+
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            dni_val = st.text_input("Número de DNI / NIE:", value=st.session_state.get("numero_dni", ""))
+            fnac_val = st.text_input("Fecha de Nacimiento:", value=st.session_state.get("fecha_nacimiento", ""))
+            fcad_val = st.text_input("Fecha de Caducidad:", value=st.session_state.get("fecha_caducidad", ""))
+
+        with col_f2:
+            lnac_val = st.text_area("Lugar de Nacimiento:", value=st.session_state.get("lugar_nacimiento", ""), height=80)
+            dom_val = st.text_area("Domicilio:", value=st.session_state.get("domicilio", ""), height=100)
+
+        es_misma_persona = st.session_state.get("es_misma_persona", False)
+
+        if es_misma_persona:
+            st.success("✔ Verificación Facial: Coincidencia Confirmada")
+        else:
+            st.warning("⚠️ Verificación Facial: Revisión Manual Requerida")
+
+        if st.button("📄 Generar Informe PDF"):
+            path_dni_front = "dni_front_temp.jpg"
+            path_user = "usuario_temp.jpg"
+            path_dni_back = "dni_back_temp.jpg"
+
             pdf_path = "informe_verificacion.pdf"
             c = canvas.Canvas(pdf_path, pagesize=A4)
             width, height = A4
 
-            # Encabezado
+            # Encabezado PDF
             c.setFillColor(colors.HexColor("#1E3A8A"))
             c.rect(0, height - 90, width, 90, fill=True, stroke=False)
             
@@ -261,14 +270,18 @@ if foto_dni_front and foto_original:
                 c.setFillColor(colors.HexColor("#991B1B"))
                 c.drawString(40, height - 120, "✖ VERIFICACIÓN FACIAL: REVISIÓN MANUAL REQUERIDA")
 
-            # Cuadro de Datos
+            # Cuadro de Datos Extraídos
             c.setFillColor(colors.HexColor("#0F172A"))
             c.setFont("Helvetica-Bold", 12)
             c.drawString(40, height - 155, "DATOS EXTRAÍDOS DEL DOCUMENTO")
 
-            nac_lines = lugar_nacimiento.split('\n')
-            dom_lines = domicilio.split('\n')
-            
+            nac_lines = [l for l in lnac_val.split('\n') if l.strip()]
+            dom_lines = [l for l in dom_val.split('\n') if l.strip()]
+            if not nac_lines:
+                nac_lines = ["No especificado"]
+            if not dom_lines:
+                dom_lines = ["No especificado"]
+
             box_height = 115 + (max(0, len(nac_lines) - 1) * 12) + (max(0, len(dom_lines) - 1) * 12)
 
             c.setStrokeColor(colors.HexColor("#E2E8F0"))
@@ -277,13 +290,13 @@ if foto_dni_front and foto_original:
 
             y_pos = height - 180
 
-            # Número DNI
+            # DNI
             c.setFillColor(colors.HexColor("#334155"))
             c.setFont("Helvetica-Bold", 10)
             c.drawString(60, y_pos, "Número de DNI / NIE:")
             c.setFillColor(colors.HexColor("#0F172A"))
             c.setFont("Helvetica", 10)
-            c.drawString(220, y_pos, numero_dni)
+            c.drawString(220, y_pos, dni_val)
 
             # Fecha Nacimiento
             y_pos -= 20
@@ -292,9 +305,9 @@ if foto_dni_front and foto_original:
             c.drawString(60, y_pos, "Fecha de Nacimiento:")
             c.setFillColor(colors.HexColor("#0F172A"))
             c.setFont("Helvetica", 10)
-            c.drawString(220, y_pos, fecha_nacimiento)
+            c.drawString(220, y_pos, fnac_val)
 
-            # Lugar de Nacimiento
+            # Lugar de Nacimiento (Multilínea)
             y_pos -= 20
             c.setFillColor(colors.HexColor("#334155"))
             c.setFont("Helvetica-Bold", 10)
@@ -305,7 +318,7 @@ if foto_dni_front and foto_original:
                 c.drawString(220, y_pos - (idx * 12), line)
             y_pos -= (len(nac_lines) - 1) * 12
 
-            # Domicilio
+            # Domicilio (Multilínea)
             y_pos -= 20
             c.setFillColor(colors.HexColor("#334155"))
             c.setFont("Helvetica-Bold", 10)
@@ -323,15 +336,15 @@ if foto_dni_front and foto_original:
             c.drawString(60, y_pos, "Fecha de Caducidad:")
             c.setFillColor(colors.HexColor("#0F172A"))
             c.setFont("Helvetica", 10)
-            c.drawString(220, y_pos, fecha_caducidad)
+            c.drawString(220, y_pos, fcad_val)
 
-            # Evidencias Fotográficas
+            # Evidencias
             y_foto_section = height - 195 - box_height
             c.setFillColor(colors.HexColor("#0F172A"))
             c.setFont("Helvetica-Bold", 12)
             c.drawString(40, y_foto_section, "EVIDENCIAS FOTOGRÁFICAS")
 
-            if img_dni_back_pil:
+            if os.path.exists(path_dni_back):
                 c.drawImage(path_dni_front, 40, y_foto_section - 160, width=160, height=140, preserveAspectRatio=True)
                 c.drawImage(path_dni_back, 215, y_foto_section - 160, width=160, height=140, preserveAspectRatio=True)
                 c.drawImage(path_user, 390, y_foto_section - 160, width=160, height=140, preserveAspectRatio=True)
@@ -339,22 +352,16 @@ if foto_dni_front and foto_original:
                 c.drawImage(path_dni_front, 40, y_foto_section - 180, width=240, height=180, preserveAspectRatio=True)
                 c.drawImage(path_user, 315, y_foto_section - 180, width=240, height=180, preserveAspectRatio=True)
 
-            # Nota a pie de página
             c.setFont("Helvetica-Oblique", 7.5)
             c.setFillColor(colors.HexColor("#64748B"))
             c.drawString(40, 30, "Aviso: Este documento no es oficial y se basa únicamente en un reconocimiento facial de características biométricas.")
 
             c.save()
 
-            if es_misma_persona:
-                st.success(f"✅ ¡VERIFICACIÓN FACIAL CONFIRMADA! DNI: **{numero_dni}**")
-            else:
-                st.warning(f"⚠️ Proceso completado. DNI: **{numero_dni}**")
-
             with open(pdf_path, "rb") as pdf_file:
                 st.download_button(
-                    label="📄 Descargar Informe en PDF",
+                    label="⬇️ Descargar Informe en PDF",
                     data=pdf_file,
-                    file_name=f"Informe_DNI_{numero_dni}.pdf",
+                    file_name=f"Informe_DNI_{dni_val}.pdf",
                     mime="application/pdf"
                 )
