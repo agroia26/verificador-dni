@@ -2,4 +2,4 @@ streamlit
 pillow
 pytesseract
 reportlab
-face_recognition
+opencv-python-headless
