@@ -1,6 +1,4 @@
-streamlit
-pillow
-pytesseract
-reportlab
-deepface
-tf-keras
+tesseract-ocr
+tesseract-ocr-spa
+cmake
+libgl1
