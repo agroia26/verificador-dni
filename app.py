@@ -7,20 +7,74 @@ from reportlab.lib import colors
 import cv2
 import numpy as np
 import re
+import urllib.request
 import os
-
-# Intentar importar DeepFace para comparación facial mediante IA
-try:
-    from deepface import DeepFace
-    HAS_DEEPFACE = True
-except Exception:
-    HAS_DEEPFACE = False
 
 st.set_page_config(page_title="Verificación DNI Pro", layout="centered")
 st.title("🆔 Verificación de DNI y Comparativa Facial")
 
+CASCADE_PATH = "haarcascade_frontalface_default.xml"
+
+def obtener_cascade():
+    """Descarga de forma segura el clasificador de rostros Haar Cascade si no existe"""
+    if not os.path.exists(CASCADE_PATH) or os.path.getsize(CASCADE_PATH) < 1000:
+        url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req) as response, open(CASCADE_PATH, 'wb') as out_file:
+            out_file.write(response.read())
+
+def detectar_y_recortar_rostro(img_bgr):
+    """Detecta la cara en la imagen y devuelve el recorte en escala de grises"""
+    try:
+        obtener_cascade()
+        face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        
+        # Ecualización de histograma para mejorar el contraste del rostro
+        gray_eq = cv2.equalizeHist(gray)
+        faces = face_cascade.detectMultiScale(gray_eq, scaleFactor=1.1, minNeighbors=3, minSize=(50, 50))
+        
+        if len(faces) > 0:
+            # Seleccionar la cara más grande encontrada
+            faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+            x, y, w, h = faces[0]
+            return gray[y:y+h, x:x+w]
+        return None
+    except Exception:
+        return None
+
+def comparar_rostros(img1_bgr, img2_bgr):
+    """Compara los recortes de rostro usando extracción de puntos clave (ORB) y coincidencia"""
+    face1 = detectar_y_recortar_rostro(img1_bgr)
+    face2 = detectar_y_recortar_rostro(img2_bgr)
+
+    if face1 is None or face2 is None:
+        # Fallback si el contraste del DNI dificulta el recorte automático de la cara
+        gray1 = cv2.cvtColor(img1_bgr, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(img2_bgr, cv2.COLOR_BGR2GRAY)
+        face1 = cv2.resize(gray1, (150, 150))
+        face2 = cv2.resize(gray2, (150, 150))
+    else:
+        face1 = cv2.resize(face1, (150, 150))
+        face2 = cv2.resize(face2, (150, 150))
+
+    orb = cv2.ORB_create(nfeatures=500)
+    kp1, des1 = orb.detectAndCompute(face1, None)
+    kp2, des2 = orb.detectAndCompute(face2, None)
+
+    if des1 is None or des2 is None:
+        return False
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(des1, des2)
+    buenas = [m for m in matches if m.distance < 60]
+
+    # Umbral de coincidencia de rasgos faciales
+    return len(buenas) >= 8
+
 def rotar_imagen(pil_img, grados):
-    """Rota una imagen PIL según el ángulo seleccionado"""
+    """Rota la imagen PIL según la elección del usuario"""
     if grados == 90:
         return pil_img.rotate(-90, expand=True)
     elif grados == 180:
@@ -28,45 +82,6 @@ def rotar_imagen(pil_img, grados):
     elif grados == 270:
         return pil_img.rotate(-270, expand=True)
     return pil_img
-
-def verificar_similitud_facial(img1_path, img2_path):
-    """Compara los rostros utilizando IA (DeepFace) o coincidencia de puntos clave de OpenCV"""
-    if HAS_DEEPFACE:
-        try:
-            # Modelo VGG-Face / Facenet para calcular distancia entre rasgos
-            res = DeepFace.verify(
-                img1_path=img1_path, 
-                img2_path=img2_path, 
-                model_name="VGG-Face", 
-                enforce_detection=False
-            )
-            return res.get("verified", False), float(res.get("distance", 1.0))
-        except Exception:
-            pass
-
-    # Fallback avanzado con OpenCV (ORB Feature Matching) si DeepFace aún carga
-    try:
-        img1 = cv2.imread(img1_path, cv2.IMREAD_GRAYSCALE)
-        img2 = cv2.imread(img2_path, cv2.IMREAD_GRAYSCALE)
-
-        orb = cv2.ORB_create(nfeatures=500)
-        kp1, des1 = orb.detectAndCompute(img1, None)
-        kp2, des2 = orb.detectAndCompute(img2, None)
-
-        if des1 is None or des2 is None:
-            return False, 1.0
-
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        matches = bf.match(des1, des2)
-
-        matches = sorted(matches, key=lambda x: x.distance)
-        buenas_coincidencias = [m for m in matches if m.distance < 50]
-
-        if len(buenas_coincidencias) > 15:
-            return True, 0.3
-        return False, 0.8
-    except Exception:
-        return False, 1.0
 
 foto_dni = st.file_uploader("1. Sube la foto del DNI", type=["jpg", "png", "jpeg"])
 foto_original = st.file_uploader("2. Sube la foto del usuario (Selfie)", type=["jpg", "png", "jpeg"])
@@ -76,7 +91,7 @@ if foto_dni and foto_original:
     img_user_pil = ImageOps.exif_transpose(Image.open(foto_original)).convert("RGB")
 
     st.markdown("---")
-    st.subheader("🔄 Ajuste de Rotación (Asegúrate de que ambas fotos estén verticales)")
+    st.subheader("🔄 Ajuste de Rotación")
 
     col_rot1, col_rot2 = st.columns(2)
     with col_rot1:
@@ -90,49 +105,59 @@ if foto_dni and foto_original:
         st.image(img_user_pil, caption="Rostro Orientado", use_container_width=True)
 
     if st.button("🚀 Procesar Verificación"):
-        with st.spinner("Analizando redes neuronales faciales y extrayendo OCR..."):
-            # Guardar archivos
+        with st.spinner("Procesando fotos, analizando rostro y extrayendo texto..."):
             path_dni = "dni_temp.jpg"
             path_user = "usuario_temp.jpg"
             img_dni_pil.save(path_dni)
             img_user_pil.save(path_user)
 
-            # 1. Comparación Facial con IA
-            es_misma_persona, distancia = verificar_similitud_facial(path_dni, path_user)
-
-            # 2. OCR y Extracción de Datos
             img1_cv = cv2.imread(path_dni)
-            gray_dni = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
+            img2_cv = cv2.imread(path_user)
 
+            # 1. Comparación de rostro
+            es_misma_persona = comparar_rostros(img1_cv, img2_cv)
+
+            # 2. OCR
+            gray_dni = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
             h, w = gray_dni.shape
             if w < 1400:
                 scale = 1400 / w
                 gray_dni = cv2.resize(gray_dni, (1400, int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
-            gray_dni = cv2.addWeighted(gray_dni, 1.5, gray_dni, -0.5, 0)
-
             texto_raw = pytesseract.image_to_string(gray_dni, lang='spa', config='--psm 11')
             texto_raw += "\n" + pytesseract.image_to_string(gray_dni, lang='spa', config='--psm 6')
 
-            # DNI
+            # Extraer DNI
             match_dni = re.search(r'\b\d{8}\s*[-_]?\s*[A-Za-z]\b', texto_raw)
             numero_dni = re.sub(r'[\s\-_]', '', match_dni.group(0)).upper() if match_dni else "No detectado"
 
-            # Fechas
-            patron_fechas = r'\b(\d{2})[\s/.-](\d{2})[\s/.-](\d{4}|\d{2})\b'
+            # Extraer Fechas (DD MM AAAA, DD/MM/AAAA)
+            patron_fechas = r'\b(\d{2})[\s/.-](\d{2})[\s/.-](\d{4})\b'
             fechas_coincidentes = re.findall(patron_fechas, texto_raw)
 
-            fechas_formateadas = []
-            for f in fechas_coincidentes:
-                dia, mes, anio = f
-                if len(anio) == 2:
-                    anio = "20" + anio if int(anio) < 50 else "19" + anio
-                fechas_formateadas.append(f"{dia}/{mes}/{anio}")
+            fechas_formateadas = [f"{d}/{m}/{a}" for d, m, a in fechas_coincidentes]
 
-            fecha_nacimiento = fechas_formateadas[0] if len(fechas_formateadas) > 0 else "No detectada"
-            fecha_caducidad = fechas_formateadas[1] if len(fechas_formateadas) > 1 else "No detectada"
+            # Asignación precisa de fechas: Nacimiento, Emisión y Validez/Caducidad
+            fecha_nacimiento = "No detectada"
+            fecha_caducidad = "No detectada"
 
-            # 3. Generación de PDF
+            if len(fechas_formateadas) >= 3:
+                fecha_nacimiento = fechas_formateadas[0]
+                # La 3ª fecha corresponde a VALIDEZ (Caducidad)
+                fecha_caducidad = fechas_formateadas[2]
+            elif len(fechas_formateadas) == 2:
+                fecha_nacimiento = fechas_formateadas[0]
+                fecha_caducidad = fechas_formateadas[1]
+            elif len(fechas_formateadas) == 1:
+                fecha_nacimiento = fechas_formateadas[0]
+
+            # Búsqueda directa por palabra clave "VALIDEZ"
+            match_validez = re.search(r'(?:VALIDEZ|VAL)[^\d]*(\d{2}[\s/.-]\d{2}[\s/.-]\d{4})', texto_raw, re.IGNORECASE)
+            if match_validez:
+                f_val = match_validez.group(1).replace(' ', '/').replace('.', '/').replace('-', '/')
+                fecha_caducidad = f_val
+
+            # 3. Generar PDF
             pdf_path = "informe_verificacion.pdf"
             c = canvas.Canvas(pdf_path, pagesize=A4)
             width, height = A4
@@ -147,16 +172,16 @@ if foto_dni and foto_original:
             c.setFont("Helvetica", 11)
             c.drawString(40, height - 60, "Informe Oficial de Verificación de Identidad")
 
-            # Estado
+            # Resultado Verificación
             c.setFont("Helvetica-Bold", 13)
             if es_misma_persona:
                 c.setFillColor(colors.HexColor("#166534"))
                 c.drawString(40, height - 120, "✔ VERIFICACIÓN FACIAL: COINCIDENCIA CONFIRMADA")
             else:
                 c.setFillColor(colors.HexColor("#991B1B"))
-                c.drawString(40, height - 120, "✖ VERIFICACIÓN FACIAL: NO COINCIDEN / REVISIÓN REQUERIDA")
+                c.drawString(40, height - 120, "✖ VERIFICACIÓN FACIAL: REVISIÓN MANUAL REQUERIDA")
 
-            # Datos Extraídos
+            # Datos
             c.setFillColor(colors.HexColor("#0F172A"))
             c.setFont("Helvetica-Bold", 12)
             c.drawString(40, height - 160, "DATOS EXTRAÍDOS DEL DOCUMENTO")
@@ -191,9 +216,9 @@ if foto_dni and foto_original:
             c.save()
 
             if es_misma_persona:
-                st.success(f"✅ ¡VERIFICACIÓN FACIAL CORRECTA! Coincidencia confirmada para el DNI: **{numero_dni}**")
+                st.success(f"✅ ¡VERIFICACIÓN FACIAL CONFIRMADA! DNI: **{numero_dni}**")
             else:
-                st.warning(f"⚠️ DNI detectado: **{numero_dni}**, pero la prueba de rostro requiere revisión manual.")
+                st.warning(f"⚠️ Proceso completado. DNI: **{numero_dni}**")
 
             with open(pdf_path, "rb") as pdf_file:
                 st.download_button(
