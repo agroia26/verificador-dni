@@ -31,12 +31,10 @@ def detectar_y_recortar_rostro(img_bgr):
         face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         
-        # Ecualización de histograma para mejorar el contraste del rostro
         gray_eq = cv2.equalizeHist(gray)
         faces = face_cascade.detectMultiScale(gray_eq, scaleFactor=1.1, minNeighbors=3, minSize=(50, 50))
         
         if len(faces) > 0:
-            # Seleccionar la cara más grande encontrada
             faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
             x, y, w, h = faces[0]
             return gray[y:y+h, x:x+w]
@@ -50,7 +48,6 @@ def comparar_rostros(img1_bgr, img2_bgr):
     face2 = detectar_y_recortar_rostro(img2_bgr)
 
     if face1 is None or face2 is None:
-        # Fallback si el contraste del DNI dificulta el recorte automático de la cara
         gray1 = cv2.cvtColor(img1_bgr, cv2.COLOR_BGR2GRAY)
         gray2 = cv2.cvtColor(img2_bgr, cv2.COLOR_BGR2GRAY)
         face1 = cv2.resize(gray1, (150, 150))
@@ -70,7 +67,6 @@ def comparar_rostros(img1_bgr, img2_bgr):
     matches = bf.match(des1, des2)
     buenas = [m for m in matches if m.distance < 60]
 
-    # Umbral de coincidencia de rasgos faciales
     return len(buenas) >= 8
 
 def rotar_imagen(pil_img, grados):
@@ -131,19 +127,17 @@ if foto_dni and foto_original:
             match_dni = re.search(r'\b\d{8}\s*[-_]?\s*[A-Za-z]\b', texto_raw)
             numero_dni = re.sub(r'[\s\-_]', '', match_dni.group(0)).upper() if match_dni else "No detectado"
 
-            # Extraer Fechas (DD MM AAAA, DD/MM/AAAA)
+            # Extraer Fechas
             patron_fechas = r'\b(\d{2})[\s/.-](\d{2})[\s/.-](\d{4})\b'
             fechas_coincidentes = re.findall(patron_fechas, texto_raw)
 
             fechas_formateadas = [f"{d}/{m}/{a}" for d, m, a in fechas_coincidentes]
 
-            # Asignación precisa de fechas: Nacimiento, Emisión y Validez/Caducidad
             fecha_nacimiento = "No detectada"
             fecha_caducidad = "No detectada"
 
             if len(fechas_formateadas) >= 3:
                 fecha_nacimiento = fechas_formateadas[0]
-                # La 3ª fecha corresponde a VALIDEZ (Caducidad)
                 fecha_caducidad = fechas_formateadas[2]
             elif len(fechas_formateadas) == 2:
                 fecha_nacimiento = fechas_formateadas[0]
@@ -151,7 +145,6 @@ if foto_dni and foto_original:
             elif len(fechas_formateadas) == 1:
                 fecha_nacimiento = fechas_formateadas[0]
 
-            # Búsqueda directa por palabra clave "VALIDEZ"
             match_validez = re.search(r'(?:VALIDEZ|VAL)[^\d]*(\d{2}[\s/.-]\d{2}[\s/.-]\d{4})', texto_raw, re.IGNORECASE)
             if match_validez:
                 f_val = match_validez.group(1).replace(' ', '/').replace('.', '/').replace('-', '/')
@@ -170,7 +163,8 @@ if foto_dni and foto_original:
             c.setFont("Helvetica-Bold", 18)
             c.drawString(40, height - 40, "VERIFICACIÓN DE IDENTIDAD")
             c.setFont("Helvetica", 11)
-            c.drawString(40, height - 60, "Informe Oficial de Verificación de Identidad")
+            # Subtítulo modificado
+            c.drawString(40, height - 60, "Informe de Verificación de Identidad")
 
             # Resultado Verificación
             c.setFont("Helvetica-Bold", 13)
@@ -181,7 +175,7 @@ if foto_dni and foto_original:
                 c.setFillColor(colors.HexColor("#991B1B"))
                 c.drawString(40, height - 120, "✖ VERIFICACIÓN FACIAL: REVISIÓN MANUAL REQUERIDA")
 
-            # Datos
+            # Datos Extraídos
             c.setFillColor(colors.HexColor("#0F172A"))
             c.setFont("Helvetica-Bold", 12)
             c.drawString(40, height - 160, "DATOS EXTRAÍDOS DEL DOCUMENTO")
@@ -209,9 +203,10 @@ if foto_dni and foto_original:
             c.drawImage(path_dni, 40, height - 510, width=240, height=190, preserveAspectRatio=True)
             c.drawImage(path_user, 315, height - 510, width=240, height=190, preserveAspectRatio=True)
 
-            c.setFont("Helvetica", 8)
-            c.setFillColor(colors.HexColor("#94A3B8"))
-            c.drawString(40, 30, "Documento generado automáticamente por la aplicación de verificación.")
+            # Nota a pie de página modificada
+            c.setFont("Helvetica-Oblique", 7.5)
+            c.setFillColor(colors.HexColor("#64748B"))
+            c.drawString(40, 30, "Aviso: Este documento no es oficial y se basa únicamente en un reconocimiento facial de características biométricas.")
 
             c.save()
 
