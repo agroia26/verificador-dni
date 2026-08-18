@@ -80,77 +80,57 @@ def rotar_imagen(pil_img, grados):
     return pil_img
 
 def extraer_datos_reverso(img_reverso_bgr):
-    """Procesa el reverso del DNI con preprocesamiento adaptativo para extraer Domicilio y Lugar de Nacimiento"""
-    gray = cv2.cvtColor(img_reverso_bgr, cv2.COLOR_BGR2GRAY)
+    """Extracción por regiones geométricas fijas del DNI español (Crop OCR)"""
+    h, w, _ = img_reverso_bgr.shape
     
-    # Redimensionar para mejorar definición de caracteres
-    h, w = gray.shape
-    if w < 1600:
-        scale = 1600 / w
-        gray = cv2.resize(gray, (1600, int(h * scale)), interpolation=cv2.INTER_CUBIC)
+    # 1. Región Domicilio (Parte superior-derecha/centro)
+    crop_domicilio = img_reverso_bgr[int(h*0.05):int(h*0.48), int(w*0.35):int(w*0.85)]
+    
+    # 2. Región Lugar de Nacimiento (Parte media-derecha)
+    crop_nacimiento = img_reverso_bgr[int(h*0.45):int(h*0.75), int(w*0.42):int(w*0.85)]
 
-    # Ecualización por contraste local (CLAHE) para eliminar sombras de la tarjeta
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    gray_prep = clahe.apply(gray)
+    def aplicar_ocr_region(img_crop):
+        gray = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+        
+        # Binarización para eliminar fondo y mapa
+        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        txt = pytesseract.image_to_string(thresh, lang='spa', config='--psm 6')
+        if not txt.strip():
+            txt = pytesseract.image_to_string(gray, lang='spa', config='--psm 6')
+        return txt
 
-    # Lectura OCR multimodelo
-    texto_raw = pytesseract.image_to_string(gray_prep, lang='spa', config='--psm 6')
-    texto_raw += "\n" + pytesseract.image_to_string(gray, lang='spa', config='--psm 4')
-    texto_raw += "\n" + pytesseract.image_to_string(gray_prep, lang='spa', config='--psm 11')
+    txt_dom = aplicar_ocr_region(crop_domicilio)
+    txt_nac = aplicar_ocr_region(crop_nacimiento)
 
-    lineas = [line.strip() for line in texto_raw.split('\n') if len(line.strip()) > 1]
+    # Limpieza de Domicilio
+    lineas_dom = [line.strip() for line in txt_dom.split('\n') if len(line.strip()) > 2]
+    lineas_dom_filtradas = []
+    for line in lineas_dom:
+        l_up = line.upper()
+        if not any(k in l_up for k in ["DOMICILIO", "REINO", "ESPAÑA"]):
+            # Eliminar caracteres raros de OCR
+            clean = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', line).strip()
+            if clean:
+                lineas_dom_filtradas.append(clean)
 
-    domicilio_lineas = []
-    lugar_lineas = []
+    domicilio = " ".join(lineas_dom_filtradas) if lineas_dom_filtradas else "No detectado"
 
-    estado = "INICIO"
+    # Limpieza de Lugar de Nacimiento
+    lineas_nac = [line.strip() for line in txt_nac.split('\n') if len(line.strip()) > 2]
+    lineas_nac_filtradas = []
+    for line in lineas_nac:
+        l_up = line.upper()
+        # Cortar en cuanto aparezca HIJO DE o PADRES o Nombres propios
+        if any(k in l_up for k in ["HIJO", "PADRES", "CANDIDO", "EMILIA", "EQUIPO", "IDESP"]):
+            break
+        if not any(k in l_up for k in ["LUGAR", "NACIMIENTO", "PROVINCIA"]):
+            clean = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', line).strip()
+            if clean:
+                lineas_nac_filtradas.append(clean)
 
-    for line in lineas:
-        line_upper = line.upper()
-
-        # Detección de sección Domicilio
-        if any(k in line_upper for k in ["DOMICILIO", "DOMIC", "MICILIO"]):
-            estado = "CAPTURANDO_DOMICILIO"
-            sub = re.sub(r'.*DOMICILIO[^\w]*', '', line, flags=re.IGNORECASE).strip()
-            if len(sub) > 2:
-                domicilio_lineas.append(sub)
-            continue
-
-        # Detección de sección Lugar de Nacimiento
-        if any(k in line_upper for k in ["LUGAR DE NACIMIENTO", "LUGAR NACIMIENTO", "NACIMIENTO"]):
-            estado = "CAPTURANDO_LUGAR"
-            sub = re.sub(r'.*NACIMIENTO[^\w]*', '', line, flags=re.IGNORECASE).strip()
-            if len(sub) > 2:
-                lugar_lineas.append(sub)
-            continue
-
-        # Fin de secciones informativas
-        if any(k in line_upper for k in ["EQUIPO", "PADRES", "HIJOS", "IDESP", "<<<"]):
-            estado = "FIN"
-
-        # Agrupar líneas según estado
-        if estado == "CAPTURANDO_DOMICILIO":
-            if not any(k in line_upper for k in ["DNI", "ESPAÑA", "REINO"]):
-                domicilio_lineas.append(line)
-        elif estado == "CAPTURANDO_LUGAR":
-            if not any(k in line_upper for k in ["DNI", "ESPAÑA", "REINO"]):
-                lugar_lineas.append(line)
-
-    # Procesar Domicilio
-    if domicilio_lineas:
-        raw_dom = " ".join(domicilio_lineas)
-        raw_dom = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', raw_dom).strip()
-        domicilio = raw_dom if len(raw_dom) > 3 else "No detectado"
-    else:
-        domicilio = "No detectado"
-
-    # Procesar Lugar de Nacimiento
-    if lugar_lineas:
-        raw_lug = " ".join(lugar_lineas)
-        raw_lug = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', raw_lug).strip()
-        lugar_nacimiento = raw_lug if len(raw_lug) > 2 else "No detectado"
-    else:
-        lugar_nacimiento = "No detectado"
+    lugar_nacimiento = " ".join(lineas_nac_filtradas) if lineas_nac_filtradas else "No detectado"
 
     return lugar_nacimiento, domicilio
 
