@@ -43,7 +43,7 @@ def detectar_y_recortar_rostro(img_bgr):
         return None
 
 def comparar_rostros(img1_bgr, img2_bgr):
-    """Compara los recortes de rostro usando extracción de puntos clave (ORB) y coincidencia"""
+    """Compara los recortes de rostro usando extracción de puntos clave (ORB)"""
     face1 = detectar_y_recortar_rostro(img1_bgr)
     face2 = detectar_y_recortar_rostro(img2_bgr)
 
@@ -79,58 +79,97 @@ def rotar_imagen(pil_img, grados):
         return pil_img.rotate(-270, expand=True)
     return pil_img
 
-foto_dni = st.file_uploader("1. Sube la foto del DNI", type=["jpg", "png", "jpeg"])
-foto_original = st.file_uploader("2. Sube la foto del usuario (Selfie)", type=["jpg", "png", "jpeg"])
+def extraer_datos_reverso(img_reverso_bgr):
+    """Procesa el reverso del DNI para obtener Lugar de Nacimiento y Domicilio"""
+    gray = cv2.cvtColor(img_reverso_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    if w < 1400:
+        scale = 1400 / w
+        gray = cv2.resize(gray, (1400, int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
-if foto_dni and foto_original:
-    img_dni_pil = ImageOps.exif_transpose(Image.open(foto_dni)).convert("RGB")
+    texto = pytesseract.image_to_string(gray, lang='spa', config='--psm 11')
+    texto += "\n" + pytesseract.image_to_string(gray, lang='spa', config='--psm 6')
+
+    lugar_nacimiento = "No detectado"
+    domicilio = "No detectado"
+
+    # Extracción de Lugar de Nacimiento
+    match_lugar = re.search(r'(?:LUGAR DE NACIMIENTO|LUGAR NACIMIENTO|NACIMIENTO)[^\n:]*[:\s]*([^\n]+)', texto, re.IGNORECASE)
+    if match_lugar:
+        lugar_nacimiento = match_lugar.group(1).strip()
+        # Limpieza de ruido común de OCR
+        lugar_nacimiento = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', lugar_nacimiento).strip()
+
+    # Extracción de Domicilio
+    match_domicilio = re.search(r'(?:DOMICILIO|DIRECCION|DOMIC)[^\n:]*[:\s]*([^\n]+(?:\n[^\n]+)?)', texto, re.IGNORECASE)
+    if match_domicilio:
+        raw_dom = match_domicilio.group(1).replace('\n', ' ').strip()
+        raw_dom = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', raw_dom).strip()
+        domicilio = raw_dom[:70] if raw_dom else "No detectado"
+
+    return lugar_nacimiento if lugar_nacimiento else "No detectado", domicilio if domicilio else "No detectado"
+
+foto_dni_front = st.file_uploader("1. Sube la foto del DNI (Anverso)", type=["jpg", "png", "jpeg"])
+foto_dni_back = st.file_uploader("2. Sube la foto del DNI (Reverso)", type=["jpg", "png", "jpeg"])
+foto_original = st.file_uploader("3. Sube la foto del usuario (Selfie)", type=["jpg", "png", "jpeg"])
+
+if foto_dni_front and foto_original:
+    img_dni_front_pil = ImageOps.exif_transpose(Image.open(foto_dni_front)).convert("RGB")
     img_user_pil = ImageOps.exif_transpose(Image.open(foto_original)).convert("RGB")
+    img_dni_back_pil = ImageOps.exif_transpose(Image.open(foto_dni_back)).convert("RGB") if foto_dni_back else None
 
     st.markdown("---")
     st.subheader("🔄 Ajuste de Rotación")
 
-    col_rot1, col_rot2 = st.columns(2)
+    col_rot1, col_rot2, col_rot3 = st.columns(3)
     with col_rot1:
-        rot_dni = st.selectbox("Girar foto DNI:", [0, 90, 180, 270], format_func=lambda x: f"{x}°", key="rot_dni")
-        img_dni_pil = rotar_imagen(img_dni_pil, rot_dni)
-        st.image(img_dni_pil, caption="DNI Orientado", use_container_width=True)
+        rot_dni_front = st.selectbox("Girar DNI Anverso:", [0, 90, 180, 270], format_func=lambda x: f"{x}°", key="rot_dni_front")
+        img_dni_front_pil = rotar_imagen(img_dni_front_pil, rot_dni_front)
+        st.image(img_dni_front_pil, caption="DNI Anverso", use_container_width=True)
 
     with col_rot2:
-        rot_user = st.selectbox("Girar foto Selfie:", [0, 90, 180, 270], format_func=lambda x: f"{x}°", key="rot_user")
+        if img_dni_back_pil:
+            rot_dni_back = st.selectbox("Girar DNI Reverso:", [0, 90, 180, 270], format_func=lambda x: f"{x}°", key="rot_dni_back")
+            img_dni_back_pil = rotar_imagen(img_dni_back_pil, rot_dni_back)
+            st.image(img_dni_back_pil, caption="DNI Reverso", use_container_width=True)
+        else:
+            st.info("Reverso no subido (Opcional)")
+
+    with col_rot3:
+        rot_user = st.selectbox("Girar Selfie:", [0, 90, 180, 270], format_func=lambda x: f"{x}°", key="rot_user")
         img_user_pil = rotar_imagen(img_user_pil, rot_user)
         st.image(img_user_pil, caption="Rostro Orientado", use_container_width=True)
 
     if st.button("🚀 Procesar Verificación"):
-        with st.spinner("Procesando fotos, analizando rostro y extrayendo texto..."):
-            path_dni = "dni_temp.jpg"
+        with st.spinner("Procesando imágenes, analizando rostro y extrayendo datos..."):
+            path_dni_front = "dni_front_temp.jpg"
             path_user = "usuario_temp.jpg"
-            img_dni_pil.save(path_dni)
+            path_dni_back = "dni_back_temp.jpg"
+
+            img_dni_front_pil.save(path_dni_front)
             img_user_pil.save(path_user)
 
-            img1_cv = cv2.imread(path_dni)
-            img2_cv = cv2.imread(path_user)
+            img_front_cv = cv2.imread(path_dni_front)
+            img_user_cv = cv2.imread(path_user)
 
             # 1. Comparación de rostro
-            es_misma_persona = comparar_rostros(img1_cv, img2_cv)
+            es_misma_persona = comparar_rostros(img_front_cv, img_user_cv)
 
-            # 2. OCR
-            gray_dni = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
+            # 2. OCR Anverso
+            gray_dni = cv2.cvtColor(img_front_cv, cv2.COLOR_BGR2GRAY)
             h, w = gray_dni.shape
             if w < 1400:
                 scale = 1400 / w
                 gray_dni = cv2.resize(gray_dni, (1400, int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
-            texto_raw = pytesseract.image_to_string(gray_dni, lang='spa', config='--psm 11')
-            texto_raw += "\n" + pytesseract.image_to_string(gray_dni, lang='spa', config='--psm 6')
+            texto_front = pytesseract.image_to_string(gray_dni, lang='spa', config='--psm 11')
+            texto_front += "\n" + pytesseract.image_to_string(gray_dni, lang='spa', config='--psm 6')
 
-            # Extraer DNI
-            match_dni = re.search(r'\b\d{8}\s*[-_]?\s*[A-Za-z]\b', texto_raw)
+            match_dni = re.search(r'\b\d{8}\s*[-_]?\s*[A-Za-z]\b', texto_front)
             numero_dni = re.sub(r'[\s\-_]', '', match_dni.group(0)).upper() if match_dni else "No detectado"
 
-            # Extraer Fechas
             patron_fechas = r'\b(\d{2})[\s/.-](\d{2})[\s/.-](\d{4})\b'
-            fechas_coincidentes = re.findall(patron_fechas, texto_raw)
-
+            fechas_coincidentes = re.findall(patron_fechas, texto_front)
             fechas_formateadas = [f"{d}/{m}/{a}" for d, m, a in fechas_coincidentes]
 
             fecha_nacimiento = "No detectada"
@@ -145,12 +184,20 @@ if foto_dni and foto_original:
             elif len(fechas_formateadas) == 1:
                 fecha_nacimiento = fechas_formateadas[0]
 
-            match_validez = re.search(r'(?:VALIDEZ|VAL)[^\d]*(\d{2}[\s/.-]\d{2}[\s/.-]\d{4})', texto_raw, re.IGNORECASE)
+            match_validez = re.search(r'(?:VALIDEZ|VAL)[^\d]*(\d{2}[\s/.-]\d{2}[\s/.-]\d{4})', texto_front, re.IGNORECASE)
             if match_validez:
-                f_val = match_validez.group(1).replace(' ', '/').replace('.', '/').replace('-', '/')
-                fecha_caducidad = f_val
+                fecha_caducidad = match_validez.group(1).replace(' ', '/').replace('.', '/').replace('-', '/')
 
-            # 3. Generar PDF
+            # 3. OCR Reverso (Si se adjunta)
+            lugar_nacimiento = "No aportado"
+            domicilio = "No aportado"
+
+            if img_dni_back_pil:
+                img_dni_back_pil.save(path_dni_back)
+                img_back_cv = cv2.imread(path_dni_back)
+                lugar_nacimiento, domicilio = extraer_datos_reverso(img_back_cv)
+
+            # 4. Generar PDF
             pdf_path = "informe_verificacion.pdf"
             c = canvas.Canvas(pdf_path, pagesize=A4)
             width, height = A4
@@ -163,7 +210,6 @@ if foto_dni and foto_original:
             c.setFont("Helvetica-Bold", 18)
             c.drawString(40, height - 40, "VERIFICACIÓN DE IDENTIDAD")
             c.setFont("Helvetica", 11)
-            # Subtítulo modificado
             c.drawString(40, height - 60, "Informe de Verificación de Identidad")
 
             # Resultado Verificación
@@ -175,35 +221,44 @@ if foto_dni and foto_original:
                 c.setFillColor(colors.HexColor("#991B1B"))
                 c.drawString(40, height - 120, "✖ VERIFICACIÓN FACIAL: REVISIÓN MANUAL REQUERIDA")
 
-            # Datos Extraídos
+            # Cuadro de Datos
             c.setFillColor(colors.HexColor("#0F172A"))
             c.setFont("Helvetica-Bold", 12)
-            c.drawString(40, height - 160, "DATOS EXTRAÍDOS DEL DOCUMENTO")
+            c.drawString(40, height - 155, "DATOS EXTRAÍDOS DEL DOCUMENTO")
 
             c.setStrokeColor(colors.HexColor("#E2E8F0"))
             c.setFillColor(colors.HexColor("#F8FAFC"))
-            c.roundRect(40, height - 260, width - 80, 85, 6, fill=True, stroke=True)
+            c.roundRect(40, height - 280, width - 80, 115, 6, fill=True, stroke=True)
 
             c.setFillColor(colors.HexColor("#334155"))
             c.setFont("Helvetica-Bold", 10)
-            c.drawString(60, height - 195, "Número de DNI / NIE:")
-            c.drawString(60, height - 215, "Fecha de Nacimiento:")
-            c.drawString(60, height - 235, "Fecha de Caducidad:")
+            c.drawString(60, height - 180, "Número de DNI / NIE:")
+            c.drawString(60, height - 200, "Fecha de Nacimiento:")
+            c.drawString(60, height - 220, "Lugar de Nacimiento:")
+            c.drawString(60, height - 240, "Domicilio:")
+            c.drawString(60, height - 260, "Fecha de Caducidad:")
 
             c.setFont("Helvetica", 10)
             c.setFillColor(colors.HexColor("#0F172A"))
-            c.drawString(220, height - 195, numero_dni)
-            c.drawString(220, height - 215, fecha_nacimiento)
-            c.drawString(220, height - 235, fecha_caducidad)
+            c.drawString(220, height - 180, numero_dni)
+            c.drawString(220, height - 200, fecha_nacimiento)
+            c.drawString(220, height - 220, lugar_nacimiento)
+            c.drawString(220, height - 240, domicilio)
+            c.drawString(220, height - 260, fecha_caducidad)
 
-            # Evidencias
+            # Evidencias Fotográficas
             c.setFont("Helvetica-Bold", 12)
-            c.drawString(40, height - 290, "EVIDENCIAS FOTOGRÁFICAS")
+            c.drawString(40, height - 310, "EVIDENCIAS FOTOGRÁFICAS")
 
-            c.drawImage(path_dni, 40, height - 510, width=240, height=190, preserveAspectRatio=True)
-            c.drawImage(path_user, 315, height - 510, width=240, height=190, preserveAspectRatio=True)
+            if img_dni_back_pil:
+                c.drawImage(path_dni_front, 40, height - 490, width=160, height=140, preserveAspectRatio=True)
+                c.drawImage(path_dni_back, 215, height - 490, width=160, height=140, preserveAspectRatio=True)
+                c.drawImage(path_user, 390, height - 490, width=160, height=140, preserveAspectRatio=True)
+            else:
+                c.drawImage(path_dni_front, 40, height - 510, width=240, height=190, preserveAspectRatio=True)
+                c.drawImage(path_user, 315, height - 510, width=240, height=190, preserveAspectRatio=True)
 
-            # Nota a pie de página modificada
+            # Nota a pie de página
             c.setFont("Helvetica-Oblique", 7.5)
             c.setFillColor(colors.HexColor("#64748B"))
             c.drawString(40, 30, "Aviso: Este documento no es oficial y se basa únicamente en un reconocimiento facial de características biométricas.")
