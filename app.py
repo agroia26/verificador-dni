@@ -80,59 +80,63 @@ def rotar_imagen(pil_img, grados):
     return pil_img
 
 def extraer_datos_reverso(img_reverso_bgr):
-    """Extracción por regiones geométricas fijas del DNI español (Crop OCR)"""
+    """Recorte espacial estricto sin solapamientos entre Domicilio y Nacimiento"""
     h, w, _ = img_reverso_bgr.shape
-    
-    # 1. Región Domicilio (Parte superior-derecha/centro)
-    crop_domicilio = img_reverso_bgr[int(h*0.05):int(h*0.48), int(w*0.35):int(w*0.85)]
-    
-    # 2. Región Lugar de Nacimiento (Parte media-derecha)
-    crop_nacimiento = img_reverso_bgr[int(h*0.45):int(h*0.75), int(w*0.42):int(w*0.85)]
 
-    def aplicar_ocr_region(img_crop):
-        gray = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY)
+    # 1. Zona Domicilio: Cuadrante superior derecho (del 5% al 41% de altura)
+    crop_dom = img_reverso_bgr[int(h*0.05):int(h*0.41), int(w*0.30):int(w*0.85)]
+
+    # 2. Zona Lugar de Nacimiento: Cuadrante medio derecho (del 42% al 66% de altura)
+    crop_nac = img_reverso_bgr[int(h*0.42):int(h*0.66), int(w*0.38):int(w*0.85)]
+
+    def procesar_ocr_region(crop_img):
+        gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
         gray = cv2.resize(gray, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
-        
-        # Binarización para eliminar fondo y mapa
-        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        gray_eq = clahe.apply(gray)
+        _, thresh = cv2.threshold(gray_eq, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
         txt = pytesseract.image_to_string(thresh, lang='spa', config='--psm 6')
-        if not txt.strip():
-            txt = pytesseract.image_to_string(gray, lang='spa', config='--psm 6')
+        if len(txt.strip()) < 4:
+            txt = pytesseract.image_to_string(gray_eq, lang='spa', config='--psm 6')
         return txt
 
-    txt_dom = aplicar_ocr_region(crop_domicilio)
-    txt_nac = aplicar_ocr_region(crop_nacimiento)
+    txt_dom = procesar_ocr_region(crop_dom)
+    txt_nac = procesar_ocr_region(crop_nac)
 
-    # Limpieza de Domicilio
-    lineas_dom = [line.strip() for line in txt_dom.split('\n') if len(line.strip()) > 2]
-    lineas_dom_filtradas = []
-    for line in lineas_dom:
-        l_up = line.upper()
-        if not any(k in l_up for k in ["DOMICILIO", "REINO", "ESPAÑA"]):
-            # Eliminar caracteres raros de OCR
-            clean = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', line).strip()
-            if clean:
-                lineas_dom_filtradas.append(clean)
+    # Filtrado Domicilio (mantiene saltos de línea)
+    dom_lines = []
+    for line in txt_dom.split('\n'):
+        line_clean = line.strip()
+        line_upper = line_clean.upper()
+        if not line_clean:
+            continue
+        if any(k in line_upper for k in ["DOMICILIO", "REINO", "ESPAÑA", "DNI"]):
+            continue
+        clean = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', line_clean).strip()
+        if len(clean) > 1:
+            dom_lines.append(clean)
 
-    domicilio = " ".join(lineas_dom_filtradas) if lineas_dom_filtradas else "No detectado"
-
-    # Limpieza de Lugar de Nacimiento
-    lineas_nac = [line.strip() for line in txt_nac.split('\n') if len(line.strip()) > 2]
-    lineas_nac_filtradas = []
-    for line in lineas_nac:
-        l_up = line.upper()
-        # Cortar en cuanto aparezca HIJO DE o PADRES o Nombres propios
-        if any(k in l_up for k in ["HIJO", "PADRES", "CANDIDO", "EMILIA", "EQUIPO", "IDESP"]):
+    # Filtrado Lugar de Nacimiento (mantiene saltos de línea)
+    nac_lines = []
+    for line in txt_nac.split('\n'):
+        line_clean = line.strip()
+        line_upper = line_clean.upper()
+        if not line_clean:
+            continue
+        # Parar si entra en zona de padres o firmas
+        if any(k in line_upper for k in ["PADRES", "HIJO", "EQUIPO", "IDESP", "CANDIDO", "EMILIA"]):
             break
-        if not any(k in l_up for k in ["LUGAR", "NACIMIENTO", "PROVINCIA"]):
-            clean = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', line).strip()
-            if clean:
-                lineas_nac_filtradas.append(clean)
+        if any(k in line_upper for k in ["LUGAR", "NACIMIENTO", "PROVINCIA"]):
+            continue
+        clean = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', line_clean).strip()
+        if len(clean) > 1:
+            nac_lines.append(clean)
 
-    lugar_nacimiento = " ".join(lineas_nac_filtradas) if lineas_nac_filtradas else "No detectado"
+    domicilio_str = "\n".join(dom_lines) if dom_lines else "No detectado"
+    lugar_nac_str = "\n".join(nac_lines) if nac_lines else "No detectado"
 
-    return lugar_nacimiento, domicilio
+    return lugar_nac_str, domicilio_str
 
 foto_dni_front = st.file_uploader("1. Sube la foto del DNI (Anverso)", type=["jpg", "png", "jpeg"])
 foto_dni_back = st.file_uploader("2. Sube la foto del DNI (Reverso)", type=["jpg", "png", "jpeg"])
@@ -222,7 +226,7 @@ if foto_dni_front and foto_original:
                 img_back_cv = cv2.imread(path_dni_back)
                 lugar_nacimiento, domicilio = extraer_datos_reverso(img_back_cv)
 
-            # 4. Generar PDF
+            # 4. Generar PDF con renderizado multilínea dinámico
             pdf_path = "informe_verificacion.pdf"
             c = canvas.Canvas(pdf_path, pagesize=A4)
             width, height = A4
@@ -251,37 +255,79 @@ if foto_dni_front and foto_original:
             c.setFont("Helvetica-Bold", 12)
             c.drawString(40, height - 155, "DATOS EXTRAÍDOS DEL DOCUMENTO")
 
+            # Cálculo de altura de cuadro dinámico para evitar solapamientos
+            nac_lines = lugar_nacimiento.split('\n')
+            dom_lines = domicilio.split('\n')
+            
+            box_height = 115 + (max(0, len(nac_lines) - 1) * 12) + (max(0, len(dom_lines) - 1) * 12)
+
             c.setStrokeColor(colors.HexColor("#E2E8F0"))
             c.setFillColor(colors.HexColor("#F8FAFC"))
-            c.roundRect(40, height - 280, width - 80, 115, 6, fill=True, stroke=True)
+            c.roundRect(40, height - 165 - box_height, width - 80, box_height, 6, fill=True, stroke=True)
 
+            y_pos = height - 180
+
+            # Número DNI
             c.setFillColor(colors.HexColor("#334155"))
             c.setFont("Helvetica-Bold", 10)
-            c.drawString(60, height - 180, "Número de DNI / NIE:")
-            c.drawString(60, height - 200, "Fecha de Nacimiento:")
-            c.drawString(60, height - 220, "Lugar de Nacimiento:")
-            c.drawString(60, height - 240, "Domicilio:")
-            c.drawString(60, height - 260, "Fecha de Caducidad:")
-
-            c.setFont("Helvetica", 10)
+            c.drawString(60, y_pos, "Número de DNI / NIE:")
             c.setFillColor(colors.HexColor("#0F172A"))
-            c.drawString(220, height - 180, numero_dni)
-            c.drawString(220, height - 200, fecha_nacimiento)
-            c.drawString(220, height - 220, lugar_nacimiento)
-            c.drawString(220, height - 240, domicilio)
-            c.drawString(220, height - 260, fecha_caducidad)
+            c.setFont("Helvetica", 10)
+            c.drawString(220, y_pos, numero_dni)
+
+            # Fecha Nacimiento
+            y_pos -= 20
+            c.setFillColor(colors.HexColor("#334155"))
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(60, y_pos, "Fecha de Nacimiento:")
+            c.setFillColor(colors.HexColor("#0F172A"))
+            c.setFont("Helvetica", 10)
+            c.drawString(220, y_pos, fecha_nacimiento)
+
+            # Lugar de Nacimiento (Multilínea)
+            y_pos -= 20
+            c.setFillColor(colors.HexColor("#334155"))
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(60, y_pos, "Lugar de Nacimiento:")
+            c.setFillColor(colors.HexColor("#0F172A"))
+            c.setFont("Helvetica", 10)
+            for idx, line in enumerate(nac_lines):
+                c.drawString(220, y_pos - (idx * 12), line)
+            y_pos -= (len(nac_lines) - 1) * 12
+
+            # Domicilio (Multilínea)
+            y_pos -= 20
+            c.setFillColor(colors.HexColor("#334155"))
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(60, y_pos, "Domicilio:")
+            c.setFillColor(colors.HexColor("#0F172A"))
+            c.setFont("Helvetica", 10)
+            for idx, line in enumerate(dom_lines):
+                c.drawString(220, y_pos - (idx * 12), line)
+            y_pos -= (len(dom_lines) - 1) * 12
+
+            # Fecha Caducidad
+            y_pos -= 20
+            c.setFillColor(colors.HexColor("#334155"))
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(60, y_pos, "Fecha de Caducidad:")
+            c.setFillColor(colors.HexColor("#0F172A"))
+            c.setFont("Helvetica", 10)
+            c.drawString(220, y_pos, fecha_caducidad)
 
             # Evidencias Fotográficas
+            y_foto_section = height - 195 - box_height
+            c.setFillColor(colors.HexColor("#0F172A"))
             c.setFont("Helvetica-Bold", 12)
-            c.drawString(40, height - 310, "EVIDENCIAS FOTOGRÁFICAS")
+            c.drawString(40, y_foto_section, "EVIDENCIAS FOTOGRÁFICAS")
 
             if img_dni_back_pil:
-                c.drawImage(path_dni_front, 40, height - 490, width=160, height=140, preserveAspectRatio=True)
-                c.drawImage(path_dni_back, 215, height - 490, width=160, height=140, preserveAspectRatio=True)
-                c.drawImage(path_user, 390, height - 490, width=160, height=140, preserveAspectRatio=True)
+                c.drawImage(path_dni_front, 40, y_foto_section - 160, width=160, height=140, preserveAspectRatio=True)
+                c.drawImage(path_dni_back, 215, y_foto_section - 160, width=160, height=140, preserveAspectRatio=True)
+                c.drawImage(path_user, 390, y_foto_section - 160, width=160, height=140, preserveAspectRatio=True)
             else:
-                c.drawImage(path_dni_front, 40, height - 510, width=240, height=190, preserveAspectRatio=True)
-                c.drawImage(path_user, 315, height - 510, width=240, height=190, preserveAspectRatio=True)
+                c.drawImage(path_dni_front, 40, y_foto_section - 180, width=240, height=180, preserveAspectRatio=True)
+                c.drawImage(path_user, 315, y_foto_section - 180, width=240, height=180, preserveAspectRatio=True)
 
             # Nota a pie de página
             c.setFont("Helvetica-Oblique", 7.5)
