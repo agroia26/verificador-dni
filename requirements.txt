@@ -1,0 +1,6 @@
+streamlit
+pillow
+pytesseract
+reportlab
+deepface
+tf-keras
