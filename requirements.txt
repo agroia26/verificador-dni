@@ -3,3 +3,5 @@ pillow
 pytesseract
 reportlab
 opencv-python-headless
+tf-keras
+deepface
