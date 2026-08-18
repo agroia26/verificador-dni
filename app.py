@@ -80,58 +80,58 @@ def rotar_imagen(pil_img, grados):
     return pil_img
 
 def extraer_datos_reverso(img_reverso_bgr):
-    """Recorte espacial estricto sin solapamientos entre Domicilio y Nacimiento"""
+    """Recorte calibrado de alta precisión para el reverso del DNI español"""
     h, w, _ = img_reverso_bgr.shape
 
-    # 1. Zona Domicilio: Cuadrante superior derecho (del 5% al 41% de altura)
-    crop_dom = img_reverso_bgr[int(h*0.05):int(h*0.41), int(w*0.30):int(w*0.85)]
+    # 1. Zona Domicilio: Cuadrante superior izquierdo-centro (del 0% al 28% de altura)
+    crop_dom = img_reverso_bgr[int(h*0.02):int(h*0.30), int(w*0.48):int(w*0.82)]
 
-    # 2. Zona Lugar de Nacimiento: Cuadrante medio derecho (del 42% al 66% de altura)
-    crop_nac = img_reverso_bgr[int(h*0.42):int(h*0.66), int(w*0.38):int(w*0.85)]
+    # 2. Zona Lugar de Nacimiento: Cuadrante medio (del 44% al 62% de altura)
+    crop_nac = img_reverso_bgr[int(h*0.44):int(h*0.62), int(w*0.48):int(w*0.82)]
 
-    def procesar_ocr_region(crop_img):
+    def procesar_ocr_crop(crop_img):
         gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-        gray_eq = clahe.apply(gray)
-        _, thresh = cv2.threshold(gray_eq, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+        
+        # Filtro bilateral para suavizar ruido sin perder bordes de letras
+        filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+        
+        # Binarización limpia
+        _, thresh = cv2.threshold(filtered, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
         txt = pytesseract.image_to_string(thresh, lang='spa', config='--psm 6')
-        if len(txt.strip()) < 4:
-            txt = pytesseract.image_to_string(gray_eq, lang='spa', config='--psm 6')
+        if len(txt.strip()) < 3:
+            txt = pytesseract.image_to_string(gray, lang='spa', config='--psm 6')
         return txt
 
-    txt_dom = procesar_ocr_region(crop_dom)
-    txt_nac = procesar_ocr_region(crop_nac)
+    txt_dom = procesar_ocr_crop(crop_dom)
+    txt_nac = procesar_ocr_crop(crop_nac)
 
-    # Filtrado Domicilio (mantiene saltos de línea)
+    # Filtrar líneas Domicilio
     dom_lines = []
     for line in txt_dom.split('\n'):
-        line_clean = line.strip()
-        line_upper = line_clean.upper()
-        if not line_clean:
+        clean = line.strip()
+        upper = clean.upper()
+        if not clean:
             continue
-        if any(k in line_upper for k in ["DOMICILIO", "REINO", "ESPAÑA", "DNI"]):
+        if any(k in upper for k in ["DOMICILIO", "DNI", "REINO", "ESPAÑA"]):
             continue
-        clean = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', line_clean).strip()
-        if len(clean) > 1:
-            dom_lines.append(clean)
+        clean_text = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', clean).strip()
+        if len(clean_text) > 2:
+            dom_lines.append(clean_text)
 
-    # Filtrado Lugar de Nacimiento (mantiene saltos de línea)
+    # Filtrar líneas Lugar de Nacimiento
     nac_lines = []
     for line in txt_nac.split('\n'):
-        line_clean = line.strip()
-        line_upper = line_clean.upper()
-        if not line_clean:
+        clean = line.strip()
+        upper = clean.upper()
+        if not clean:
             continue
-        # Parar si entra en zona de padres o firmas
-        if any(k in line_upper for k in ["PADRES", "HIJO", "EQUIPO", "IDESP", "CANDIDO", "EMILIA"]):
-            break
-        if any(k in line_upper for k in ["LUGAR", "NACIMIENTO", "PROVINCIA"]):
+        if any(k in upper for k in ["LUGAR", "NACIMIENTO", "HIJO", "PADRES", "CANDIDO", "EMILIA"]):
             continue
-        clean = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', line_clean).strip()
-        if len(clean) > 1:
-            nac_lines.append(clean)
+        clean_text = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', clean).strip()
+        if len(clean_text) > 2:
+            nac_lines.append(clean_text)
 
     domicilio_str = "\n".join(dom_lines) if dom_lines else "No detectado"
     lugar_nac_str = "\n".join(nac_lines) if nac_lines else "No detectado"
@@ -226,7 +226,7 @@ if foto_dni_front and foto_original:
                 img_back_cv = cv2.imread(path_dni_back)
                 lugar_nacimiento, domicilio = extraer_datos_reverso(img_back_cv)
 
-            # 4. Generar PDF con renderizado multilínea dinámico
+            # 4. Generar PDF
             pdf_path = "informe_verificacion.pdf"
             c = canvas.Canvas(pdf_path, pagesize=A4)
             width, height = A4
@@ -255,7 +255,6 @@ if foto_dni_front and foto_original:
             c.setFont("Helvetica-Bold", 12)
             c.drawString(40, height - 155, "DATOS EXTRAÍDOS DEL DOCUMENTO")
 
-            # Cálculo de altura de cuadro dinámico para evitar solapamientos
             nac_lines = lugar_nacimiento.split('\n')
             dom_lines = domicilio.split('\n')
             
@@ -284,7 +283,7 @@ if foto_dni_front and foto_original:
             c.setFont("Helvetica", 10)
             c.drawString(220, y_pos, fecha_nacimiento)
 
-            # Lugar de Nacimiento (Multilínea)
+            # Lugar de Nacimiento
             y_pos -= 20
             c.setFillColor(colors.HexColor("#334155"))
             c.setFont("Helvetica-Bold", 10)
@@ -295,7 +294,7 @@ if foto_dni_front and foto_original:
                 c.drawString(220, y_pos - (idx * 12), line)
             y_pos -= (len(nac_lines) - 1) * 12
 
-            # Domicilio (Multilínea)
+            # Domicilio
             y_pos -= 20
             c.setFillColor(colors.HexColor("#334155"))
             c.setFont("Helvetica-Bold", 10)
