@@ -7,113 +7,109 @@ from reportlab.lib import colors
 import cv2
 import numpy as np
 import re
+import urllib.request
+import os
 
 st.set_page_config(page_title="Verificación DNI Pro", layout="centered")
 st.title("🆔 Verificación de DNI y Comparativa Facial")
 
+# Descargar detector de rostros de respaldo si no existe en el servidor
+CASCADE_PATH = "haarcascade_frontalface_default.xml"
+if not os.path.exists(CASCADE_PATH):
+    url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+    urllib.request.urlretrieve(url, CASCADE_PATH)
+
+def rotar_imagen(pil_img, grados):
+    """Rota una imagen PIL según el ángulo seleccionado por el usuario"""
+    if grados == 90:
+        return pil_img.rotate(-90, expand=True)
+    elif grados == 180:
+        return pil_img.rotate(180, expand=True)
+    elif grados == 270:
+        return pil_img.rotate(-270, expand=True)
+    return pil_img
+
 foto_dni = st.file_uploader("1. Sube la foto del DNI", type=["jpg", "png", "jpeg"])
 foto_original = st.file_uploader("2. Sube la foto del usuario (Selfie)", type=["jpg", "png", "jpeg"])
 
-def arreglar_orientacion(imagen_pil):
-    """Corrige la rotación EXIF de fotos tomadas con móviles"""
-    try:
-        return ImageOps.exif_transpose(imagen_pil)
-    except Exception:
-        return imagen_pil
-
-def detectar_y_rotar_rostro(img_cv):
-    """Intenta detectar un rostro probando en las 4 orientaciones posibles (0, 90, 180, 270 grados)"""
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    for angulo in [0, 90, 180, 270]:
-        if angulo == 90:
-            rotada = cv2.rotate(img_cv, cv2.ROTATE_90_CLOCKWISE)
-        elif angulo == 180:
-            rotada = cv2.rotate(img_cv, cv2.ROTATE_180)
-        elif angulo == 270:
-            rotada = cv2.rotate(img_cv, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        else:
-            rotada = img_cv
-
-        gray = cv2.cvtColor(rotada, cv2.COLOR_BGR2GRAY)
-        caras = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4)
-        if len(caras) > 0:
-            return rotada, caras[0]
-    return img_cv, None
-
 if foto_dni and foto_original:
-    col1, col2 = st.columns(2)
-    with col1:
-        st.image(foto_dni, caption="DNI Escaneado", use_container_width=True)
-    with col2:
-        st.image(foto_original, caption="Rostro Fotografiado", use_container_width=True)
+    # Cargar imágenes arreglando orientación básica EXIF
+    img_dni_pil = ImageOps.exif_transpose(Image.open(foto_dni)).convert("RGB")
+    img_user_pil = ImageOps.exif_transpose(Image.open(foto_original)).convert("RGB")
+
+    st.markdown("---")
+    st.subheader("🔄 Ajuste de Rotación (Asegúrate de que ambas fotos se vean derechas)")
+
+    col_rot1, col_rot2 = st.columns(2)
+    with col_rot1:
+        rot_dni = st.selectbox("Girar foto DNI:", [0, 90, 180, 270], format_func=lambda x: f"{x}°", key="rot_dni")
+        img_dni_pil = rotar_imagen(img_dni_pil, rot_dni)
+        st.image(img_dni_pil, caption="DNI Orientado", use_container_width=True)
+
+    with col_rot2:
+        rot_user = st.selectbox("Girar foto Selfie:", [0, 90, 180, 270], format_func=lambda x: f"{x}°", key="rot_user")
+        img_user_pil = rotar_imagen(img_user_pil, rot_user)
+        st.image(img_user_pil, caption="Rostro Orientado", use_container_width=True)
 
     if st.button("🚀 Procesar Verificación"):
-        with st.spinner("Orientando imágenes, analizando rostros y extrayendo datos..."):
-            # 1. Cargar e igualar orientación EXIF
-            img_dni_pil = arreglar_orientacion(Image.open(foto_dni)).convert("RGB")
-            img_user_pil = arreglar_orientacion(Image.open(foto_original)).convert("RGB")
-
-            # Guardar imágenes base corregidas
+        with st.spinner("Analizando información y generando informe..."):
+            # Guardar fotos orientadas
             img_dni_pil.save("dni_temp.jpg")
             img_user_pil.save("usuario_temp.jpg")
 
-            img_dni_cv = cv2.imread("dni_temp.jpg")
-            img_user_cv = cv2.imread("usuario_temp.jpg")
+            img1_cv = cv2.imread("dni_temp.jpg")
+            img2_cv = cv2.imread("usuario_temp.jpg")
 
-            # 2. Corregir rotación automática mediante detección facial
-            img_dni_correcta, cara1 = detectar_y_rotar_rostro(img_dni_cv)
-            img_user_correcta, cara2 = detectar_y_rotar_rostro(img_user_cv)
+            # 1. Detección Facial con OpenCV usando el archivo local
+            face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
+            gray1 = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2GRAY)
+            gray2 = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2GRAY)
 
-            # Sobrescribir con la orientación enderezada
-            cv2.imwrite("dni_temp.jpg", img_dni_correcta)
-            cv2.imwrite("usuario_temp.jpg", img_user_correcta)
+            faces1 = face_cascade.detectMultiScale(gray1, scaleFactor=1.1, minNeighbors=3)
+            faces2 = face_cascade.detectMultiScale(gray2, scaleFactor=1.1, minNeighbors=3)
 
-            # 3. Verificación Facial (Coincidencia mediante histogramas HOG de área facial)
             es_misma_persona = False
-            if cara1 is not None and cara2 is not None:
-                x1, y1, w1, h1 = cara1
-                x2, y2, w2, h2 = cara2
-                
-                crop1 = cv2.resize(img_dni_correcta[y1:y1+h1, x1:x1+w1], (100, 100))
-                crop2 = cv2.resize(img_user_correcta[y2:y2+h2, x2:x2+w2], (100, 100))
+            if len(faces1) > 0 and len(faces2) > 0:
+                x1, y1, w1, h1 = faces1[0]
+                x2, y2, w2, h2 = faces2[0]
 
-                hist1 = cv2.calcHist([cv2.cvtColor(crop1, cv2.COLOR_BGR2GRAY)], [0], None, [256], [0, 256])
-                hist2 = cv2.calcHist([cv2.cvtColor(crop2, cv2.COLOR_BGR2GRAY)], [0], None, [256], [0, 256])
+                crop1 = cv2.resize(gray1[y1:y1+h1, x1:x1+w1], (100, 100))
+                crop2 = cv2.resize(gray2[y2:y2+h2, x2:x2+w2], (100, 100))
+
+                hist1 = cv2.calcHist([crop1], [0], None, [256], [0, 256])
+                hist2 = cv2.calcHist([crop2], [0], None, [256], [0, 256])
 
                 cv2.normalize(hist1, hist1)
                 cv2.normalize(hist2, hist2)
 
                 similitud = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-                if similitud > 0.4:
+                if similitud > 0.35:
                     es_misma_persona = True
 
-            # 4. OCR mejorado en la imagen corregida
-            gray_dni = cv2.cvtColor(img_dni_correcta, cv2.COLOR_BGR2GRAY)
-
-            # Escalado de alta resolución para lectura OCR
-            h, w = gray_dni.shape
+            # 2. OCR en DNI
+            h, w = gray1.shape
             if w < 1200:
                 scale = 1200 / w
-                gray_dni = cv2.resize(gray_dni, (1200, int(h * scale)), interpolation=cv2.INTER_CUBIC)
+                gray1 = cv2.resize(gray1, (1200, int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
-            texto_raw = pytesseract.image_to_string(gray_dni, lang='spa', config='--psm 11')
-            texto_raw += "\n" + pytesseract.image_to_string(gray_dni, lang='spa')
+            texto_raw = pytesseract.image_to_string(gray1, lang='spa', config='--psm 11')
+            texto_raw += "\n" + pytesseract.image_to_string(gray1, lang='spa')
 
-            # DNI (8 dígitos + letra)
+            # Extraer DNI
             match_dni = re.search(r'\b\d{8}\s*[-_]?\s*[A-Za-z]\b', texto_raw)
             if match_dni:
                 numero_dni = re.sub(r'[\s\-_]', '', match_dni.group(0)).upper()
             else:
                 numero_dni = "No detectado"
 
-            # Fechas del DNI Español (Formatos DD/MM/AAAA, DD MM AAAA o DD.MM.AAAA)
+            # Extraer Fechas DNI (formatos DD MM AAAA, DD/MM/AAAA, DD-MM-AAAA)
             fechas_encontradas = re.findall(r'\b\d{2}[\s/.-]\d{2}[\s/.-]\d{4}\b', texto_raw)
             fechas_limpias = [re.sub(r'[\s.-]', '/', f) for f in fechas_encontradas]
 
             fecha_nacimiento = fechas_limpias[0] if len(fechas_limpias) > 0 else "No detectada"
             fecha_caducidad = fechas_limpias[1] if len(fechas_limpias) > 1 else "No detectada"
 
-            # 5. Generación del Informe PDF
+            # 3. PDF
             pdf_path = "informe_verificacion.pdf"
             c = canvas.Canvas(pdf_path, pagesize=A4)
             width, height = A4
@@ -160,7 +156,7 @@ if foto_dni and foto_original:
 
             # Fotos
             c.setFont("Helvetica-Bold", 12)
-            c.drawString(40, height - 290, "EVIDENCIAS FOTOGRÁFICAS (ORIENTADAS)")
+            c.drawString(40, height - 290, "EVIDENCIAS FOTOGRÁFICAS")
 
             c.drawImage("dni_temp.jpg", 40, height - 510, width=240, height=190, preserveAspectRatio=True)
             c.drawImage("usuario_temp.jpg", 315, height - 510, width=240, height=190, preserveAspectRatio=True)
@@ -172,9 +168,9 @@ if foto_dni and foto_original:
             c.save()
 
             if es_misma_persona:
-                st.success(f"✅ ¡Rostros coincidentes! DNI: **{numero_dni}**")
+                st.success(f"✅ ¡Rostros coincidentes! DNI Detectado: **{numero_dni}**")
             else:
-                st.warning(f"⚠️ Proceso finalizado. DNI Detectado: **{numero_dni}**")
+                st.warning(f"⚠️ Proceso completado. DNI Detectado: **{numero_dni}**")
 
             with open(pdf_path, "rb") as pdf_file:
                 st.download_button(
