@@ -29,35 +29,52 @@ if foto_dni and foto_original:
             with open("usuario_temp.jpg", "wb") as f:
                 f.write(foto_original.getbuffer())
 
-            # Detección facial rápida con OpenCV
+            # 1. Detección facial rápida con OpenCV
             es_misma_persona = False
             try:
                 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-                
                 img1 = cv2.imread("dni_temp.jpg", cv2.IMREAD_GRAYSCALE)
                 img2 = cv2.imread("usuario_temp.jpg", cv2.IMREAD_GRAYSCALE)
 
                 faces1 = face_cascade.detectMultiScale(img1, 1.1, 4)
                 faces2 = face_cascade.detectMultiScale(img2, 1.1, 4)
 
-                # Confirma si detecta presencia de rostro en ambas fotos
                 if len(faces1) > 0 and len(faces2) > 0:
                     es_misma_persona = True
             except Exception:
                 es_misma_persona = False
 
-            # Lectura de texto con OCR
-            imagen_dni = Image.open("dni_temp.jpg")
-            texto_raw = pytesseract.image_to_string(imagen_dni, lang='spa')
+            # 2. Preprocesamiento de la foto para mejorar la lectura OCR
+            img_cv = cv2.imread("dni_temp.jpg")
+            
+            # Agrandar la imagen para darle nitidez a los caracteres pequeños
+            h, w = img_cv.shape[:2]
+            if w < 1200:
+                scale = 1200 / w
+                img_cv = cv2.resize(img_cv, (1200, int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
-            match_dni = re.search(r'\b\d{8}[A-Za-z]\b', texto_raw)
-            numero_dni = match_dni.group(0).upper() if match_dni else "No detectado"
+            # Convertir a escala de grises y subir contraste
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+            gray = cv2.addWeighted(gray, 1.5, gray, -0.5, 0)
 
-            fechas_encontradas = re.findall(r'\b\d{2}[/-]\d{2}[/-]\d{4}\b', texto_raw)
-            fecha_nacimiento = fechas_encontradas[0] if len(fechas_encontradas) > 0 else "No detectada"
-            fecha_caducidad = fechas_encontradas[1] if len(fechas_encontradas) > 1 else "No detectada"
+            # Lectura combinada (versión limpia + foto original)
+            texto_preprocesado = pytesseract.image_to_string(gray, lang='spa', config='--psm 11')
+            texto_original = pytesseract.image_to_string(Image.open("dni_temp.jpg"), lang='spa')
+            texto_total = texto_preprocesado + "\n" + texto_original
 
-            # Generación de informe PDF
+            # Búsqueda flexible de DNI (tolera espacios o guiones entre números y letra)
+            match_dni = re.search(r'\b\d{8}\s*[-_]?\s*[A-Za-z]\b', texto_total)
+            if match_dni:
+                numero_dni = re.sub(r'[\s\-_]', '', match_dni.group(0)).upper()
+            else:
+                numero_dni = "No detectado"
+
+            # Búsqueda flexible de Fechas (DD/MM/AAAA, DD-MM-AAAA o DD.MM.AAAA)
+            fechas_encontradas = re.findall(r'\b\d{2}[/.-]\d{2}[/.-]\d{4}\b', texto_total)
+            fecha_nacimiento = fechas_encontradas[0].replace('.', '/') if len(fechas_encontradas) > 0 else "No detectada"
+            fecha_caducidad = fechas_encontradas[1].replace('.', '/') if len(fechas_encontradas) > 1 else "No detectada"
+
+            # 3. Generación del informe PDF
             pdf_path = "informe_verificacion.pdf"
             c = canvas.Canvas(pdf_path, pagesize=A4)
             width, height = A4
@@ -116,10 +133,10 @@ if foto_dni and foto_original:
 
             c.save()
 
-            if es_misma_persona:
-                st.success(f"✅ ¡Proceso completado! DNI Detectado: **{numero_dni}**")
+            if numero_dni != "No detectado":
+                st.success(f"✅ ¡DNI Detectado con éxito!: **{numero_dni}**")
             else:
-                st.warning(f"⚠️ Revisa las imágenes. DNI Detectado: **{numero_dni}**")
+                st.warning("⚠️ No se pudo leer el número de DNI. Asegúrate de que la foto esté bien enfocada y sin reflejos.")
 
             with open(pdf_path, "rb") as pdf_file:
                 st.download_button(
