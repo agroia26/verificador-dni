@@ -80,34 +80,79 @@ def rotar_imagen(pil_img, grados):
     return pil_img
 
 def extraer_datos_reverso(img_reverso_bgr):
-    """Procesa el reverso del DNI para obtener Lugar de Nacimiento y Domicilio"""
+    """Procesa el reverso del DNI con preprocesamiento adaptativo para extraer Domicilio y Lugar de Nacimiento"""
     gray = cv2.cvtColor(img_reverso_bgr, cv2.COLOR_BGR2GRAY)
+    
+    # Redimensionar para mejorar definición de caracteres
     h, w = gray.shape
-    if w < 1400:
-        scale = 1400 / w
-        gray = cv2.resize(gray, (1400, int(h * scale)), interpolation=cv2.INTER_CUBIC)
+    if w < 1600:
+        scale = 1600 / w
+        gray = cv2.resize(gray, (1600, int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
-    texto = pytesseract.image_to_string(gray, lang='spa', config='--psm 11')
-    texto += "\n" + pytesseract.image_to_string(gray, lang='spa', config='--psm 6')
+    # Ecualización por contraste local (CLAHE) para eliminar sombras de la tarjeta
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    gray_prep = clahe.apply(gray)
 
-    lugar_nacimiento = "No detectado"
-    domicilio = "No detectado"
+    # Lectura OCR multimodelo
+    texto_raw = pytesseract.image_to_string(gray_prep, lang='spa', config='--psm 6')
+    texto_raw += "\n" + pytesseract.image_to_string(gray, lang='spa', config='--psm 4')
+    texto_raw += "\n" + pytesseract.image_to_string(gray_prep, lang='spa', config='--psm 11')
 
-    # Extracción de Lugar de Nacimiento
-    match_lugar = re.search(r'(?:LUGAR DE NACIMIENTO|LUGAR NACIMIENTO|NACIMIENTO)[^\n:]*[:\s]*([^\n]+)', texto, re.IGNORECASE)
-    if match_lugar:
-        lugar_nacimiento = match_lugar.group(1).strip()
-        # Limpieza de ruido común de OCR
-        lugar_nacimiento = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', lugar_nacimiento).strip()
+    lineas = [line.strip() for line in texto_raw.split('\n') if len(line.strip()) > 1]
 
-    # Extracción de Domicilio
-    match_domicilio = re.search(r'(?:DOMICILIO|DIRECCION|DOMIC)[^\n:]*[:\s]*([^\n]+(?:\n[^\n]+)?)', texto, re.IGNORECASE)
-    if match_domicilio:
-        raw_dom = match_domicilio.group(1).replace('\n', ' ').strip()
+    domicilio_lineas = []
+    lugar_lineas = []
+
+    estado = "INICIO"
+
+    for line in lineas:
+        line_upper = line.upper()
+
+        # Detección de sección Domicilio
+        if any(k in line_upper for k in ["DOMICILIO", "DOMIC", "MICILIO"]):
+            estado = "CAPTURANDO_DOMICILIO"
+            sub = re.sub(r'.*DOMICILIO[^\w]*', '', line, flags=re.IGNORECASE).strip()
+            if len(sub) > 2:
+                domicilio_lineas.append(sub)
+            continue
+
+        # Detección de sección Lugar de Nacimiento
+        if any(k in line_upper for k in ["LUGAR DE NACIMIENTO", "LUGAR NACIMIENTO", "NACIMIENTO"]):
+            estado = "CAPTURANDO_LUGAR"
+            sub = re.sub(r'.*NACIMIENTO[^\w]*', '', line, flags=re.IGNORECASE).strip()
+            if len(sub) > 2:
+                lugar_lineas.append(sub)
+            continue
+
+        # Fin de secciones informativas
+        if any(k in line_upper for k in ["EQUIPO", "PADRES", "HIJOS", "IDESP", "<<<"]):
+            estado = "FIN"
+
+        # Agrupar líneas según estado
+        if estado == "CAPTURANDO_DOMICILIO":
+            if not any(k in line_upper for k in ["DNI", "ESPAÑA", "REINO"]):
+                domicilio_lineas.append(line)
+        elif estado == "CAPTURANDO_LUGAR":
+            if not any(k in line_upper for k in ["DNI", "ESPAÑA", "REINO"]):
+                lugar_lineas.append(line)
+
+    # Procesar Domicilio
+    if domicilio_lineas:
+        raw_dom = " ".join(domicilio_lineas)
         raw_dom = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', raw_dom).strip()
-        domicilio = raw_dom[:70] if raw_dom else "No detectado"
+        domicilio = raw_dom if len(raw_dom) > 3 else "No detectado"
+    else:
+        domicilio = "No detectado"
 
-    return lugar_nacimiento if lugar_nacimiento else "No detectado", domicilio if domicilio else "No detectado"
+    # Procesar Lugar de Nacimiento
+    if lugar_lineas:
+        raw_lug = " ".join(lugar_lineas)
+        raw_lug = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', raw_lug).strip()
+        lugar_nacimiento = raw_lug if len(raw_lug) > 2 else "No detectado"
+    else:
+        lugar_nacimiento = "No detectado"
+
+    return lugar_nacimiento, domicilio
 
 foto_dni_front = st.file_uploader("1. Sube la foto del DNI (Anverso)", type=["jpg", "png", "jpeg"])
 foto_dni_back = st.file_uploader("2. Sube la foto del DNI (Reverso)", type=["jpg", "png", "jpeg"])
@@ -188,7 +233,7 @@ if foto_dni_front and foto_original:
             if match_validez:
                 fecha_caducidad = match_validez.group(1).replace(' ', '/').replace('.', '/').replace('-', '/')
 
-            # 3. OCR Reverso (Si se adjunta)
+            # 3. OCR Reverso
             lugar_nacimiento = "No aportado"
             domicilio = "No aportado"
 
