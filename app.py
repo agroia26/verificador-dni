@@ -29,11 +29,12 @@ def detectar_y_recortar_rostro(img_bgr):
         face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         gray_eq = cv2.equalizeHist(gray)
-        faces = face_cascade.detectMultiScale(gray_eq, scaleFactor=1.1, minNeighbors=3, minSize=(50, 50))
+        faces = face_cascade.detectMultiScale(gray_eq, scaleFactor=1.1, minNeighbors=4, minSize=(60, 60))
         
         if len(faces) > 0:
             faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
             x, y, w, h = faces[0]
+            # Recorte enfocado ajustando margen
             return gray[y:y+h, x:x+w]
         return None
     except Exception:
@@ -43,27 +44,44 @@ def comparar_rostros(img1_bgr, img2_bgr):
     face1 = detectar_y_recortar_rostro(img1_bgr)
     face2 = detectar_y_recortar_rostro(img2_bgr)
 
+    # Si no logra aislar un rostro claro en alguna de las dos fotos, requiere revisión
     if face1 is None or face2 is None:
-        gray1 = cv2.cvtColor(img1_bgr, cv2.COLOR_BGR2GRAY)
-        gray2 = cv2.cvtColor(img2_bgr, cv2.COLOR_BGR2GRAY)
-        face1 = cv2.resize(gray1, (150, 150))
-        face2 = cv2.resize(gray2, (150, 150))
-    else:
-        face1 = cv2.resize(face1, (150, 150))
-        face2 = cv2.resize(face2, (150, 150))
+        return False
 
-    orb = cv2.ORB_create(nfeatures=500)
+    face1 = cv2.resize(face1, (200, 200))
+    face2 = cv2.resize(face2, (200, 200))
+
+    # 1. Comparación estructural por Histograma de Textura
+    hist1 = cv2.calcHist([face1], [0], None, [256], [0, 256])
+    hist2 = cv2.calcHist([face2], [0], None, [256], [0, 256])
+    cv2.normalize(hist1, hist1, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+    cv2.normalize(hist2, hist2, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+    sim_hist = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+
+    # 2. Extracción de Puntos Biométricos Clave (ORB estricto)
+    orb = cv2.ORB_create(nfeatures=1000)
     kp1, des1 = orb.detectAndCompute(face1, None)
     kp2, des2 = orb.detectAndCompute(face2, None)
 
-    if des1 is None or des2 is None:
+    if des1 is None or des2 is None or len(kp1) < 15 or len(kp2) < 15:
         return False
 
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = bf.match(des1, des2)
-    buenas = [m for m in matches if m.distance < 60]
+    # 3. Matcher KNN con Test de Relación de Lowe (Ratio 0.70)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    matches = bf.knnMatch(des1, des2, k=2)
 
-    return len(buenas) >= 8
+    buenas = []
+    for m_pair in matches:
+        if len(m_pair) == 2:
+            m, n = m_pair
+            if m.distance < 0.70 * n.distance and m.distance < 45:
+                buenas.append(m)
+
+    min_puntos = min(len(kp1), len(kp2))
+    ratio_coincidencia = len(buenas) / min_puntos if min_puntos > 0 else 0
+
+    # Criterio estricto: requiere alta coincidencia de características únicas y consistencia de textura
+    return len(buenas) >= 18 and ratio_coincidencia >= 0.12 and sim_hist >= 0.70
 
 def rotar_imagen(pil_img, grados):
     if grados == 90:
@@ -75,10 +93,8 @@ def rotar_imagen(pil_img, grados):
     return pil_img
 
 def extraer_lugar_nacimiento(img_reverso_bgr):
-    """Extrae únicamente el lugar de nacimiento del reverso del DNI"""
     h, w, _ = img_reverso_bgr.shape
 
-    # Recorte enfocado exclusivamente en la franja derecha intermedia (Lugar de nacimiento)
     right_side = img_reverso_bgr[:, int(w*0.28):int(w*0.95)]
     h_r, w_r, _ = right_side.shape
 
@@ -152,7 +168,7 @@ if foto_dni_front and foto_original:
             img_front_cv = cv2.imread(path_dni_front)
             img_user_cv = cv2.imread(path_user)
 
-            # Comparar rostros
+            # Comparar rostros con nuevo motor
             st.session_state["es_misma_persona"] = comparar_rostros(img_front_cv, img_user_cv)
 
             # OCR Anverso
@@ -168,7 +184,7 @@ if foto_dni_front and foto_original:
             match_dni = re.search(r'\b\d{8}\s*[-_]?\s*[A-Za-z]\b', texto_front)
             st.session_state["numero_dni"] = re.sub(r'[\s\-_]', '', match_dni.group(0)).upper() if match_dni else ""
 
-            # Extracción y ordenación cronológica de fechas
+            # Extracción de fechas
             patron_fechas = r'\b(\d{2})[\s/.-](\d{2})[\s/.-](\d{4})\b'
             fechas_coincidentes = re.findall(patron_fechas, texto_front)
             fechas_formateadas = list(set([f"{d}/{m}/{a}" for d, m, a in fechas_coincidentes]))
@@ -212,7 +228,7 @@ if foto_dni_front and foto_original:
         if es_misma_persona:
             st.success("✔ Verificación Facial: Coincidencia Confirmada")
         else:
-            st.warning("⚠️ Verificación Facial: Revisión Manual Requerida")
+            st.error("✖ Verificación Facial: Revisión Manual Requerida (No coinciden)")
 
         if st.button("📄 Generar Informe PDF"):
             path_dni_front = "dni_front_temp.jpg"
