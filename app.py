@@ -77,39 +77,51 @@ def rotar_imagen(pil_img, grados):
 def extraer_datos_reverso(img_reverso_bgr):
     h, w, _ = img_reverso_bgr.shape
 
-    # Recorte horizontal optimizado para datos de texto
-    right_side = img_reverso_bgr[:, int(w*0.26):int(w*0.92)]
+    # Recorte enfocado en el bloque de texto derecho
+    right_side = img_reverso_bgr[:, int(w*0.25):int(w*0.95)]
     h_r, w_r, _ = right_side.shape
 
-    crop_dom = right_side[int(h_r*0.02):int(h_r*0.35), :]
-    crop_nac = right_side[int(h_r*0.35):int(h_r*0.58), :]
+    crop_dom = right_side[0:int(h_r*0.42), :]
+    crop_nac = right_side[int(h_r*0.38):int(h_r*0.62), :]
 
-    def procesar_ocr_multimodo(crop_img):
+    def ocr_avanzado(crop_img):
         gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
         gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
         
-        # Modo 1: Filtro CLAHE (Aumento de contraste localizado)
+        # Filtro A: Umbralización adaptativa (elimina tramas de fondo)
+        adapt = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY, 31, 15
+        )
+
+        # Filtro B: CLAHE + Otsu
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
-        txt1 = pytesseract.image_to_string(enhanced, lang='spa', config='--psm 6')
-
-        # Modo 2: Binarización Otsu con desenfoque gaussiano
         blur = cv2.GaussianBlur(enhanced, (3, 3), 0)
-        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        txt2 = pytesseract.image_to_string(thresh, lang='spa', config='--psm 6')
+        _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # Modo 3: PSM 11 (Identificación de bloques de texto dispersos)
-        txt3 = pytesseract.image_to_string(enhanced, lang='spa', config='--psm 11')
+        candidatos = []
+        for img_proc in [adapt, otsu, enhanced]:
+            for psm in [6, 4, 11]:
+                txt = pytesseract.image_to_string(img_proc, lang='spa', config=f'--psm {psm}')
+                if txt.strip():
+                    candidatos.append(txt)
 
-        # Seleccionar la opción con mayor número de palabras de más de 2 caracteres
-        candidatos = [txt1, txt2, txt3]
-        candidatos.sort(key=lambda t: len([p for p in t.split() if len(p) > 2]), reverse=True)
+        if not candidatos:
+            return ""
+
+        # Seleccionar la versión con más palabras estructuradas válidas
+        def evaluar(texto):
+            palabras = [w for w in texto.split() if len(w) > 2 and any(c.isalpha() for c in w)]
+            return len(palabras)
+
+        candidatos.sort(key=evaluar, reverse=True)
         return candidatos[0]
 
-    txt_dom = procesar_ocr_multimodo(crop_dom)
-    txt_nac = procesar_ocr_multimodo(crop_nac)
+    txt_dom = ocr_avanzado(crop_dom)
+    txt_nac = ocr_avanzado(crop_nac)
 
-    # Filtrado estricto para Domicilio
+    # Filtrar Domicilio descartando ruido
     dom_lines = []
     for line in txt_dom.split('\n'):
         clean = line.strip()
@@ -118,11 +130,14 @@ def extraer_datos_reverso(img_reverso_bgr):
             continue
         clean = re.sub(r'(?i)DOMICILIO', '', clean).strip()
         clean_text = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', clean).strip()
-        palabras_validas = [p for p in clean_text.split() if len(p) > 1 or p.isdigit()]
-        if len(palabras_validas) >= 1:
+        
+        # Descartar líneas compuestas de caracteres sueltos/ruido
+        palabras_pal = clean_text.split()
+        palabras_validas = [p for p in palabras_pal if len(p) > 1 or p.isdigit()]
+        if len(palabras_validas) >= 1 and len(clean_text) >= 4:
             dom_lines.append(clean_text)
 
-    # Filtrado estricto para Lugar de Nacimiento
+    # Filtrar Lugar de Nacimiento
     nac_lines = []
     for line in txt_nac.split('\n'):
         clean = line.strip()
