@@ -74,70 +74,24 @@ def rotar_imagen(pil_img, grados):
         return pil_img.rotate(-270, expand=True)
     return pil_img
 
-def extraer_datos_reverso(img_reverso_bgr):
+def extraer_lugar_nacimiento(img_reverso_bgr):
+    """Extrae únicamente el lugar de nacimiento del reverso del DNI"""
     h, w, _ = img_reverso_bgr.shape
 
-    # Recorte enfocado en el bloque de texto derecho
-    right_side = img_reverso_bgr[:, int(w*0.25):int(w*0.95)]
+    # Recorte enfocado exclusivamente en la franja derecha intermedia (Lugar de nacimiento)
+    right_side = img_reverso_bgr[:, int(w*0.28):int(w*0.95)]
     h_r, w_r, _ = right_side.shape
 
-    crop_dom = right_side[0:int(h_r*0.42), :]
-    crop_nac = right_side[int(h_r*0.38):int(h_r*0.62), :]
+    crop_nac = right_side[int(h_r*0.35):int(h_r*0.58), :]
 
-    def ocr_avanzado(crop_img):
-        gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-        
-        # Filtro A: Umbralización adaptativa (elimina tramas de fondo)
-        adapt = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY, 31, 15
-        )
+    gray = cv2.cvtColor(crop_nac, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+    
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    
+    txt_nac = pytesseract.image_to_string(enhanced, lang='spa', config='--psm 6')
 
-        # Filtro B: CLAHE + Otsu
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        blur = cv2.GaussianBlur(enhanced, (3, 3), 0)
-        _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        candidatos = []
-        for img_proc in [adapt, otsu, enhanced]:
-            for psm in [6, 4, 11]:
-                txt = pytesseract.image_to_string(img_proc, lang='spa', config=f'--psm {psm}')
-                if txt.strip():
-                    candidatos.append(txt)
-
-        if not candidatos:
-            return ""
-
-        # Seleccionar la versión con más palabras estructuradas válidas
-        def evaluar(texto):
-            palabras = [w for w in texto.split() if len(w) > 2 and any(c.isalpha() for c in w)]
-            return len(palabras)
-
-        candidatos.sort(key=evaluar, reverse=True)
-        return candidatos[0]
-
-    txt_dom = ocr_avanzado(crop_dom)
-    txt_nac = ocr_avanzado(crop_nac)
-
-    # Filtrar Domicilio descartando ruido
-    dom_lines = []
-    for line in txt_dom.split('\n'):
-        clean = line.strip()
-        upper = clean.upper()
-        if not clean or any(k in upper for k in ["DNI", "REINO", "ESPAÑA", "LUGAR", "NACIMIENTO"]):
-            continue
-        clean = re.sub(r'(?i)DOMICILIO', '', clean).strip()
-        clean_text = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', clean).strip()
-        
-        # Descartar líneas compuestas de caracteres sueltos/ruido
-        palabras_pal = clean_text.split()
-        palabras_validas = [p for p in palabras_pal if len(p) > 1 or p.isdigit()]
-        if len(palabras_validas) >= 1 and len(clean_text) >= 4:
-            dom_lines.append(clean_text)
-
-    # Filtrar Lugar de Nacimiento
     nac_lines = []
     for line in txt_nac.split('\n'):
         clean = line.strip()
@@ -149,7 +103,7 @@ def extraer_datos_reverso(img_reverso_bgr):
         if len(clean_text) >= 3:
             nac_lines.append(clean_text)
 
-    return "\n".join(nac_lines[:2]), "\n".join(dom_lines[:3])
+    return "\n".join(nac_lines[:2])
 
 # ------------------- INTERFAZ STREAMLIT -------------------
 
@@ -228,16 +182,14 @@ if foto_dni_front and foto_original:
                 st.session_state["fecha_nacimiento"] = fechas_ordenadas[0]
                 st.session_state["fecha_caducidad"] = fechas_ordenadas[-1] if len(fechas_ordenadas) > 1 else ""
 
-            # OCR Reverso
+            # OCR Reverso (Solo lugar de nacimiento)
             if img_dni_back_pil:
                 img_dni_back_pil.save(path_dni_back)
                 img_back_cv = cv2.imread(path_dni_back)
-                nac, dom = extraer_datos_reverso(img_back_cv)
+                nac = extraer_lugar_nacimiento(img_back_cv)
                 st.session_state["lugar_nacimiento"] = nac
-                st.session_state["domicilio"] = dom
             else:
                 st.session_state["lugar_nacimiento"] = ""
-                st.session_state["domicilio"] = ""
 
             st.session_state["procesado"] = True
 
@@ -253,8 +205,7 @@ if foto_dni_front and foto_original:
             fcad_val = st.text_input("Fecha de Caducidad:", value=st.session_state.get("fecha_caducidad", ""))
 
         with col_f2:
-            lnac_val = st.text_area("Lugar de Nacimiento:", value=st.session_state.get("lugar_nacimiento", ""), height=80)
-            dom_val = st.text_area("Domicilio:", value=st.session_state.get("domicilio", ""), height=100)
+            lnac_val = st.text_area("Lugar de Nacimiento:", value=st.session_state.get("lugar_nacimiento", ""), height=140)
 
         es_misma_persona = st.session_state.get("es_misma_persona", False)
 
@@ -297,13 +248,10 @@ if foto_dni_front and foto_original:
             c.drawString(40, height - 155, "DATOS EXTRAÍDOS DEL DOCUMENTO")
 
             nac_lines = [l for l in lnac_val.split('\n') if l.strip()]
-            dom_lines = [l for l in dom_val.split('\n') if l.strip()]
             if not nac_lines:
                 nac_lines = ["No especificado"]
-            if not dom_lines:
-                dom_lines = ["No especificado"]
 
-            box_height = 115 + (max(0, len(nac_lines) - 1) * 12) + (max(0, len(dom_lines) - 1) * 12)
+            box_height = 95 + (max(0, len(nac_lines) - 1) * 12)
 
             c.setStrokeColor(colors.HexColor("#E2E8F0"))
             c.setFillColor(colors.HexColor("#F8FAFC"))
@@ -338,17 +286,6 @@ if foto_dni_front and foto_original:
             for idx, line in enumerate(nac_lines):
                 c.drawString(220, y_pos - (idx * 12), line)
             y_pos -= (len(nac_lines) - 1) * 12
-
-            # Domicilio
-            y_pos -= 20
-            c.setFillColor(colors.HexColor("#334155"))
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(60, y_pos, "Domicilio:")
-            c.setFillColor(colors.HexColor("#0F172A"))
-            c.setFont("Helvetica", 10)
-            for idx, line in enumerate(dom_lines):
-                c.drawString(220, y_pos - (idx * 12), line)
-            y_pos -= (len(dom_lines) - 1) * 12
 
             # Fecha Caducidad
             y_pos -= 20
