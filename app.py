@@ -16,7 +16,6 @@ st.title("🆔 Verificación de DNI y Comparativa Facial")
 CASCADE_PATH = "haarcascade_frontalface_default.xml"
 
 def obtener_cascade():
-    """Descarga de forma segura el clasificador de rostros Haar Cascade si no existe"""
     if not os.path.exists(CASCADE_PATH) or os.path.getsize(CASCADE_PATH) < 1000:
         url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -25,7 +24,6 @@ def obtener_cascade():
             out_file.write(response.read())
 
 def detectar_y_recortar_rostro(img_bgr):
-    """Detecta la cara en la imagen y devuelve el recorte en escala de grises"""
     try:
         obtener_cascade()
         face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
@@ -42,7 +40,6 @@ def detectar_y_recortar_rostro(img_bgr):
         return None
 
 def comparar_rostros(img1_bgr, img2_bgr):
-    """Compara los recortes de rostro usando extracción de puntos clave (ORB)"""
     face1 = detectar_y_recortar_rostro(img1_bgr)
     face2 = detectar_y_recortar_rostro(img2_bgr)
 
@@ -69,7 +66,6 @@ def comparar_rostros(img1_bgr, img2_bgr):
     return len(buenas) >= 8
 
 def rotar_imagen(pil_img, grados):
-    """Rota la imagen PIL según la elección del usuario"""
     if grados == 90:
         return pil_img.rotate(-90, expand=True)
     elif grados == 180:
@@ -78,60 +74,53 @@ def rotar_imagen(pil_img, grados):
         return pil_img.rotate(-270, expand=True)
     return pil_img
 
-def limpiar_texto_ruido(texto_raw, max_lineas=3):
-    """Filtra y elimina de forma estricta líneas con basura/ruido de OCR"""
-    lineas_limpias = []
-    for line in texto_raw.split('\n'):
-        clean = line.strip()
-        if not clean:
-            continue
-        
-        # Ignorar encabezados conocidos
-        upper = clean.upper()
-        if any(k in upper for k in ["DOMICILIO", "LUGAR DE NACIMIENTO", "PADRES", "HIJO", "EQUIPO", "IDESP", "REINO"]):
-            continue
-
-        # Mantener solo caracteres alfanuméricos y puntuación básica
-        clean_text = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', clean).strip()
-        palabras = clean_text.split()
-
-        # Filtrar líneas basura (por ejemplo, líneas llenas de letras sueltas 'a b c d')
-        palabras_validas = [p for p in palabras if len(p) > 1 or p.isdigit()]
-        if len(palabras_validas) >= 1 and len(clean_text) >= 3:
-            lineas_limpias.append(clean_text)
-
-        if len(lineas_limpias) >= max_lineas:
-            break
-
-    return "\n".join(lineas_limpias)
-
 def extraer_datos_reverso(img_reverso_bgr):
-    """Procesamiento OCR mejorado con limpieza adaptativa"""
     h, w, _ = img_reverso_bgr.shape
 
-    # Recortes más holgados para no perder texto por bordes de imagen
-    crop_dom = img_reverso_bgr[int(h*0.02):int(h*0.38), int(w*0.30):int(w*0.90)]
-    crop_nac = img_reverso_bgr[int(h*0.38):int(h*0.65), int(w*0.30):int(w*0.90)]
+    # Recorte lateral derecho exclusivo para texto
+    right_side = img_reverso_bgr[:, int(w*0.28):int(w*0.95)]
+    h_r, w_r, _ = right_side.shape
 
-    def procesar_crop(crop):
+    # División por franjas ajustadas
+    crop_dom = right_side[0:int(h_r*0.35), :]
+    crop_nac = right_side[int(h_r*0.35):int(h_r*0.58), :]
+
+    def ocr_crop(crop):
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-        # Binarización suave
-        blur = cv2.GaussianBlur(gray, (3, 3), 0)
-        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        txt = pytesseract.image_to_string(thresh, lang='spa', config='--psm 6')
-        if len(txt.strip()) < 5:
-            txt = pytesseract.image_to_string(gray, lang='spa', config='--psm 6')
+        gray = cv2.resize(gray, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        txt = pytesseract.image_to_string(enhanced, lang='spa', config='--psm 6')
         return txt
 
-    raw_dom = procesar_crop(crop_dom)
-    raw_nac = procesar_crop(crop_nac)
+    txt_dom = ocr_crop(crop_dom)
+    txt_nac = ocr_crop(crop_nac)
 
-    domicilio_str = limpiar_texto_ruido(raw_dom, max_lineas=3)
-    lugar_nac_str = limpiar_texto_ruido(raw_nac, max_lineas=2)
+    # Filtrar Domicilio
+    dom_lines = []
+    for line in txt_dom.split('\n'):
+        clean = line.strip()
+        upper = clean.upper()
+        if not clean or any(k in upper for k in ["DNI", "REINO", "ESPAÑA"]):
+            continue
+        clean = re.sub(r'(?i)DOMICILIO', '', clean).strip()
+        clean_text = re.sub(r'[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ\s/.,ºª-]', '', clean).strip()
+        if len(clean_text) >= 3 and not clean_text.upper().startswith("HIJO"):
+            dom_lines.append(clean_text)
 
-    return lugar_nac_str, domicilio_str
+    # Filtrar Lugar de Nacimiento
+    nac_lines = []
+    for line in txt_nac.split('\n'):
+        clean = line.strip()
+        upper = clean.upper()
+        if any(k in upper for k in ["HIJO", "PADRES", "CANDIDO", "EMILIA", "EQUIPO", "IDESP"]):
+            break
+        clean = re.sub(r'(?i)LUGAR|NACIMIENTO|DE', '', clean).strip()
+        clean_text = re.sub(r'[^A-Za-zÁÉÍÓÚáéíóúÑñ\s,-]', '', clean).strip()
+        if len(clean_text) >= 3:
+            nac_lines.append(clean_text)
+
+    return "\n".join(nac_lines[:2]), "\n".join(dom_lines[:3])
 
 # ------------------- INTERFAZ STREAMLIT -------------------
 
@@ -196,16 +185,19 @@ if foto_dni_front and foto_original:
             match_dni = re.search(r'\b\d{8}\s*[-_]?\s*[A-Za-z]\b', texto_front)
             st.session_state["numero_dni"] = re.sub(r'[\s\-_]', '', match_dni.group(0)).upper() if match_dni else ""
 
+            # Extracción y ordenación cronológica de fechas
             patron_fechas = r'\b(\d{2})[\s/.-](\d{2})[\s/.-](\d{4})\b'
             fechas_coincidentes = re.findall(patron_fechas, texto_front)
-            fechas_formateadas = [f"{d}/{m}/{a}" for d, m, a in fechas_coincidentes]
+            fechas_formateadas = list(set([f"{d}/{m}/{a}" for d, m, a in fechas_coincidentes]))
 
-            st.session_state["fecha_nacimiento"] = fechas_formateadas[0] if len(fechas_formateadas) >= 1 else ""
-            st.session_state["fecha_caducidad"] = fechas_formateadas[-1] if len(fechas_formateadas) >= 2 else ""
+            def parse_date(d_str):
+                p = d_str.split('/')
+                return int(p[2]), int(p[1]), int(p[0])
 
-            match_validez = re.search(r'(?:VALIDEZ|VAL)[^\d]*(\d{2}[\s/.-]\d{2}[\s/.-]\d{4})', texto_front, re.IGNORECASE)
-            if match_validez:
-                st.session_state["fecha_caducidad"] = match_validez.group(1).replace(' ', '/').replace('.', '/').replace('-', '/')
+            if fechas_formateadas:
+                fechas_ordenadas = sorted(fechas_formateadas, key=parse_date)
+                st.session_state["fecha_nacimiento"] = fechas_ordenadas[0]
+                st.session_state["fecha_caducidad"] = fechas_ordenadas[-1] if len(fechas_ordenadas) > 1 else ""
 
             # OCR Reverso
             if img_dni_back_pil:
@@ -220,7 +212,7 @@ if foto_dni_front and foto_original:
 
             st.session_state["procesado"] = True
 
-    # Formulario de revisión de datos extraídos
+    # Formulario de revisión
     if st.session_state.get("procesado", False):
         st.subheader("📝 Revisión y Validación de Datos Extraídos")
         st.caption("Verifica o corrige cualquier dato antes de generar el informe en PDF:")
@@ -307,7 +299,7 @@ if foto_dni_front and foto_original:
             c.setFont("Helvetica", 10)
             c.drawString(220, y_pos, fnac_val)
 
-            # Lugar de Nacimiento (Multilínea)
+            # Lugar de Nacimiento
             y_pos -= 20
             c.setFillColor(colors.HexColor("#334155"))
             c.setFont("Helvetica-Bold", 10)
@@ -318,7 +310,7 @@ if foto_dni_front and foto_original:
                 c.drawString(220, y_pos - (idx * 12), line)
             y_pos -= (len(nac_lines) - 1) * 12
 
-            # Domicilio (Multilínea)
+            # Domicilio
             y_pos -= 20
             c.setFillColor(colors.HexColor("#334155"))
             c.setFont("Helvetica-Bold", 10)
